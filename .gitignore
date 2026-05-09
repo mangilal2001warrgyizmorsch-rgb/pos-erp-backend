@@ -4,12 +4,14 @@ node_modules/
 # Environment Variables
 .env
 .env.local
-.env.development
-.env.production
+.env.development.local
+.env.test.local
+.env.production.local
 
-# Uploads (Ignored to keep repo clean)
-uploads/*
+# Uploads
+uploads/
 !uploads/.gitkeep
+
 
 # Logs
 npm-debug.log*
