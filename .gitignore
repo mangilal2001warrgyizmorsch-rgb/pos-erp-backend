@@ -9,8 +9,9 @@ node_modules/
 .env.production.local
 
 # Uploads
-uploads/
+uploads/**/*
 !uploads/.gitkeep
+
 
 
 # Logs
