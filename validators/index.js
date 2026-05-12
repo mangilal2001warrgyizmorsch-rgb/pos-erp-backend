@@ -45,6 +45,20 @@ export const customerValidator = [
   validate,
 ];
 
+// Supplier validators
+export const supplierValidator = [
+  body('name').trim().notEmpty().withMessage('Supplier name is required'),
+  body('phone').trim().notEmpty().withMessage('Phone number is required'),
+  validate,
+];
+
+// Transporter validators
+export const transporterValidator = [
+  body('name').trim().notEmpty().withMessage('Transporter name is required'),
+  body('phone').trim().notEmpty().withMessage('Phone number is required'),
+  validate,
+];
+
 // Category validators
 export const categoryValidator = [
   body('name').trim().notEmpty().withMessage('Category name is required'),

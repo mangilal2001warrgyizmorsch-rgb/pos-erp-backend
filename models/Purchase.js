@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-const saleItemSchema = new mongoose.Schema({
+const purchaseItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
@@ -19,7 +19,7 @@ const saleItemSchema = new mongoose.Schema({
     required: true,
     min: [1, 'Quantity must be at least 1'],
   },
-  unitPrice: {
+  purchasePrice: {
     type: Number,
     required: true,
   },
@@ -29,22 +29,27 @@ const saleItemSchema = new mongoose.Schema({
   },
 });
 
-const saleSchema = new mongoose.Schema(
+const purchaseSchema = new mongoose.Schema(
   {
-    invoiceNumber: {
+    purchaseNumber: {
       type: String,
       required: true,
       unique: true,
     },
-    customer: {
+    supplier: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Customer',
+      ref: 'Supplier',
+      required: true,
     },
-    customerName: {
-      type: String,
-      default: 'Walk-in Customer',
+    transporter: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Transporter',
     },
-    items: [saleItemSchema],
+    invoiceNumber: {
+      type: String, // Supplier's invoice number
+      trim: true,
+    },
+    items: [purchaseItemSchema],
     subtotal: {
       type: Number,
       required: true,
@@ -57,16 +62,7 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    discountType: {
-      type: String,
-      enum: ['percentage', 'fixed'],
-      default: 'fixed',
-    },
     discountValue: {
-      type: Number,
-      default: 0,
-    },
-    discountAmount: {
       type: Number,
       default: 0,
     },
@@ -76,7 +72,7 @@ const saleSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['cash', 'card', 'upi'],
+      enum: ['cash', 'card', 'upi', 'bank_transfer', 'credit'],
       default: 'cash',
     },
     paymentStatus: {
@@ -88,20 +84,16 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    changeAmount: {
-      type: Number,
-      default: 0,
-    },
     status: {
       type: String,
-      enum: ['completed', 'cancelled', 'refunded'],
-      default: 'completed',
+      enum: ['draft', 'confirmed', 'received', 'cancelled', 'returned'],
+      default: 'confirmed',
     },
     notes: {
       type: String,
       trim: true,
     },
-    cashier: {
+    createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
@@ -112,16 +104,16 @@ const saleSchema = new mongoose.Schema(
   }
 );
 
-// Generate invoice number before validation
-saleSchema.pre('validate', async function (next) {
-  if (!this.invoiceNumber) {
-    const count = await mongoose.model('Sale').countDocuments();
+// Generate purchase number before validation
+purchaseSchema.pre('validate', async function (next) {
+  if (!this.purchaseNumber) {
+    const count = await mongoose.model('Purchase').countDocuments();
     const date = new Date();
     const year = date.getFullYear().toString().slice(-2);
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    this.invoiceNumber = `INV-${year}${month}-${(count + 1).toString().padStart(5, '0')}`;
+    this.purchaseNumber = `PUR-${year}${month}-${(count + 1).toString().padStart(5, '0')}`;
   }
   next();
 });
 
-export default mongoose.model('Sale', saleSchema);
+export default mongoose.model('Purchase', purchaseSchema);
