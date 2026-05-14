@@ -6,6 +6,7 @@ import {
   getSale,
   getDashboardStats,
   getSalesReport,
+  cancelSale,
 } from '../controllers/saleController.js';
 import { protect } from '../middleware/auth.js';
 import { saleValidator } from '../validators/index.js';
@@ -16,5 +17,6 @@ router.get('/stats/dashboard', getDashboardStats);
 router.get('/reports/sales', getSalesReport);
 router.route('/').get(getSales).post(saleValidator, createSale);
 router.route('/:id').get(getSale);
+router.route('/:id/cancel').put(cancelSale);
 
 export default router;

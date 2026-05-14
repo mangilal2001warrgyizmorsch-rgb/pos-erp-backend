@@ -1,4 +1,6 @@
 import Product from '../models/Product.js';
+import StockBatch from '../models/StockBatch.js';
+import SalesPrice from '../models/SalesPrice.js';
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -62,6 +64,87 @@ export const getProducts = async (req, res, next) => {
 export const getProduct = async (req, res, next) => {
   try {
     const product = await Product.findById(req.params.id).populate('category', 'name');
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: product,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+// @desc    Get dynamic pricing for product based on latest/FIFO batch
+// @route   GET /api/products/:id/pricing
+export const getProductPricing = async (req, res, next) => {
+  try {
+    const { strategy = 'latest' } = req.query;
+
+    const sort = strategy === 'latest' ? { createdAt: -1 } : { createdAt: 1 };
+
+    let priceEntry = await SalesPrice.findOne({
+      productId: req.params.id,
+      pricingStatus: 'active',
+      availableQty: { $gt: 0 }
+    }).sort(sort);
+
+    if (!priceEntry) {
+      priceEntry = await SalesPrice.findOne({ productId: req.params.id, pricingStatus: 'active' }).sort({ createdAt: -1 });
+    }
+
+    if (!priceEntry) {
+      // Fallback for products with no pricing
+      const product = await Product.findById(req.params.id);
+      if (!product) {
+        return res.status(404).json({
+          success: false,
+          message: 'Product not found',
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          productId: product._id,
+          batchNo: 'INITIAL-STOCK',
+          purchasePrice: 0,
+          salesPrice: 0,
+          availableQty: product.stock,
+          taxPercent: 0
+        },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        productId: priceEntry.productId,
+        batchNo: priceEntry.batchId ? priceEntry.batchId.toString() : 'PRICING-RECORD',
+        purchasePrice: priceEntry.purchasePrice,
+        salesPrice: priceEntry.calculatedSalePrice,
+        availableQty: priceEntry.availableQty,
+        taxPercent: priceEntry.taxPercent
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get single product by barcode (for fast scanning)
+// @route   GET /api/products/barcode/:barcode
+export const getProductByBarcode = async (req, res, next) => {
+  try {
+    const product = await Product.findOne({ barcode: req.params.barcode, isActive: true })
+      .populate('category', 'name');
 
     if (!product) {
       return res.status(404).json({
@@ -159,13 +242,13 @@ export const getProductStats = async (req, res, next) => {
       isActive: true,
       stock: 0,
     });
-    const totalValue = await Product.aggregate([
-      { $match: { isActive: true } },
+    const totalValue = await StockBatch.aggregate([
+      { $match: { availableQty: { $gt: 0 } } },
       {
         $group: {
           _id: null,
-          totalValue: { $sum: { $multiply: ['$stock', '$sellingPrice'] } },
-          totalCost: { $sum: { $multiply: ['$stock', '$purchasePrice'] } },
+          totalValue: { $sum: { $multiply: ['$availableQty', '$salesPrice'] } },
+          totalCost: { $sum: { $multiply: ['$availableQty', '$purchasePrice'] } },
         },
       },
     ]);

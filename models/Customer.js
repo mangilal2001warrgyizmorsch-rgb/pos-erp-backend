@@ -12,7 +12,21 @@ const customerSchema = new mongoose.Schema(
       type: String,
       trim: true,
       lowercase: true,
-      sparse: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+    },
+    gstNumber: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid Indian GST Number'],
+    },
+    state: {
+      type: String, // E.g. "Maharashtra", "Gujarat"
+      trim: true,
+    },
+    stateCode: {
+      type: String, // GST state code e.g. "27"
+      trim: true,
     },
     phone: {
       type: String,
@@ -35,6 +49,16 @@ const customerSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true,
+    },
+    walletBalance: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    creditLimit: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
   },
   {

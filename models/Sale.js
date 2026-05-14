@@ -19,9 +19,33 @@ const saleItemSchema = new mongoose.Schema({
     required: true,
     min: [1, 'Quantity must be at least 1'],
   },
-  unitPrice: {
+  unitPrice: { // This is the salesPrice
     type: Number,
     required: true,
+  },
+  purchasePrice: {
+    type: Number,
+    required: true,
+  },
+  profitAmount: {
+    type: Number,
+    default: 0,
+  },
+  taxRate: {
+    type: Number, // GST % for this specific item (e.g. 18)
+    default: 0,
+  },
+  cgst: {
+    type: Number,
+    default: 0,
+  },
+  sgst: {
+    type: Number,
+    default: 0,
+  },
+  igst: {
+    type: Number,
+    default: 0,
   },
   total: {
     type: Number,
@@ -49,11 +73,20 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    taxRate: {
+    // Overall invoice tax sums
+    totalCgst: {
       type: Number,
       default: 0,
     },
-    taxAmount: {
+    totalSgst: {
+      type: Number,
+      default: 0,
+    },
+    totalIgst: {
+      type: Number,
+      default: 0,
+    },
+    taxAmount: { // Total tax sum
       type: Number,
       default: 0,
     },
@@ -112,16 +145,10 @@ const saleSchema = new mongoose.Schema(
   }
 );
 
-// Generate invoice number before validation
-saleSchema.pre('validate', async function (next) {
-  if (!this.invoiceNumber) {
-    const count = await mongoose.model('Sale').countDocuments();
-    const date = new Date();
-    const year = date.getFullYear().toString().slice(-2);
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    this.invoiceNumber = `INV-${year}${month}-${(count + 1).toString().padStart(5, '0')}`;
-  }
-  next();
-});
+// Invoice number generation moved to controller for atomic sequences
+
+saleSchema.index({ status: 1, createdAt: -1 });
+saleSchema.index({ customer: 1, createdAt: -1 });
+saleSchema.index({ 'items.product': 1, createdAt: -1 });
 
 export default mongoose.model('Sale', saleSchema);

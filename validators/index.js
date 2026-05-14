@@ -32,8 +32,6 @@ export const productValidator = [
   body('name').trim().notEmpty().withMessage('Product name is required'),
   body('sku').trim().notEmpty().withMessage('SKU is required'),
   body('category').notEmpty().withMessage('Category is required'),
-  body('purchasePrice').isFloat({ min: 0 }).withMessage('Valid purchase price is required'),
-  body('sellingPrice').isFloat({ min: 0 }).withMessage('Valid selling price is required'),
   body('stock').isInt({ min: 0 }).withMessage('Valid stock quantity is required'),
   validate,
 ];
@@ -73,5 +71,16 @@ export const saleValidator = [
   body('subtotal').isFloat({ min: 0 }).withMessage('Valid subtotal is required'),
   body('totalAmount').isFloat({ min: 0 }).withMessage('Valid total amount is required'),
   body('paymentMethod').isIn(['cash', 'card', 'upi']).withMessage('Valid payment method is required'),
+  validate,
+];
+
+// Purchase validators
+export const purchaseValidator = [
+  body('items').isArray({ min: 1 }).withMessage('At least one item is required'),
+  body('items.*.product').notEmpty().withMessage('Product ID is required for each item'),
+  body('items.*.quantity').isInt({ min: 1 }).withMessage('Valid quantity is required for each item'),
+  body('supplier').notEmpty().withMessage('Supplier ID is required'),
+  body('subtotal').isFloat({ min: 0 }).withMessage('Valid subtotal is required'),
+  body('totalAmount').isFloat({ min: 0 }).withMessage('Valid total amount is required'),
   validate,
 ];

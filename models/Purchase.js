@@ -23,6 +23,31 @@ const purchaseItemSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  taxRate: {
+    type: Number, // GST % for this specific item (e.g. 18)
+    default: 0,
+  },
+  cgst: {
+    type: Number,
+    default: 0,
+  },
+  sgst: {
+    type: Number,
+    default: 0,
+  },
+  igst: {
+    type: Number,
+    default: 0,
+  },
+  taxAmount: {
+    type: Number,
+    default: 0,
+  },
+  salesPrice: {
+    type: Number,
+    required: true,
+    min: 0,
+  },
   total: {
     type: Number,
     required: true,
@@ -54,15 +79,24 @@ const purchaseSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    taxRate: {
+    // Overall invoice tax sums
+    totalCgst: {
       type: Number,
       default: 0,
     },
-    taxAmount: {
+    totalSgst: {
       type: Number,
       default: 0,
     },
-    discountValue: {
+    totalIgst: {
+      type: Number,
+      default: 0,
+    },
+    taxAmount: { // Total tax sum
+      type: Number,
+      default: 0,
+    },
+    discountAmount: {
       type: Number,
       default: 0,
     },
@@ -104,16 +138,10 @@ const purchaseSchema = new mongoose.Schema(
   }
 );
 
-// Generate purchase number before validation
-purchaseSchema.pre('validate', async function (next) {
-  if (!this.purchaseNumber) {
-    const count = await mongoose.model('Purchase').countDocuments();
-    const date = new Date();
-    const year = date.getFullYear().toString().slice(-2);
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    this.purchaseNumber = `PUR-${year}${month}-${(count + 1).toString().padStart(5, '0')}`;
-  }
-  next();
-});
+// Purchase number generation moved to controller for atomic sequences
+
+purchaseSchema.index({ status: 1, createdAt: -1 });
+purchaseSchema.index({ supplier: 1, createdAt: -1 });
+purchaseSchema.index({ 'items.product': 1, createdAt: -1 });
 
 export default mongoose.model('Purchase', purchaseSchema);

@@ -39,16 +39,7 @@ const productSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
-    purchasePrice: {
-      type: Number,
-      required: [true, 'Purchase price is required'],
-      min: [0, 'Purchase price cannot be negative'],
-    },
-    sellingPrice: {
-      type: Number,
-      required: [true, 'Selling price is required'],
-      min: [0, 'Selling price cannot be negative'],
-    },
+
     stock: {
       type: Number,
       required: [true, 'Stock quantity is required'],
@@ -85,11 +76,7 @@ const productSchema = new mongoose.Schema(
   }
 );
 
-// Virtual for profit margin
-productSchema.virtual('profitMargin').get(function () {
-  if (this.sellingPrice === 0) return 0;
-  return (((this.sellingPrice - this.purchasePrice) / this.sellingPrice) * 100).toFixed(2);
-});
+
 
 // Virtual for low stock status
 productSchema.virtual('isLowStock').get(function () {
@@ -98,5 +85,7 @@ productSchema.virtual('isLowStock').get(function () {
 
 // Index for search
 productSchema.index({ name: 'text', sku: 'text', barcode: 'text' });
+productSchema.index({ category: 1, isActive: 1 });
+productSchema.index({ stock: 1, lowStockThreshold: 1 });
 
 export default mongoose.model('Product', productSchema);

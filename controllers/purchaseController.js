@@ -1,9 +1,15 @@
 import Purchase from '../models/Purchase.js';
 import Product from '../models/Product.js';
 import Supplier from '../models/Supplier.js';
+import StockBatch from '../models/StockBatch.js';
+import mongoose from 'mongoose';
+import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
+import { recordStockMovement } from '../utils/stockMovement.js';
 
 // @desc    Create purchase (with inventory increase)
 // @route   POST /api/purchases
+import SalesPrice from '../models/SalesPrice.js';
+
 export const createPurchase = async (req, res, next) => {
   try {
     const {
@@ -14,7 +20,11 @@ export const createPurchase = async (req, res, next) => {
       subtotal,
       taxRate,
       taxAmount,
-      discountValue,
+      totalCgst,
+      totalSgst,
+      totalIgst,
+      discountAmount,
+      shippingCharges,
       totalAmount,
       paymentMethod,
       paymentStatus,
@@ -23,16 +33,22 @@ export const createPurchase = async (req, res, next) => {
       notes,
     } = req.body;
 
-    // Create the purchase
+    const purchaseNumber = await generateSequenceNumber('PUR');
+
     const purchase = new Purchase({
-      items,
+      purchaseNumber,
+      items: [], // We'll populate this
       supplier,
       transporter: transporter || undefined,
       invoiceNumber,
       subtotal,
       taxRate: taxRate || 0,
       taxAmount: taxAmount || 0,
-      discountValue: discountValue || 0,
+      totalCgst: totalCgst || 0,
+      totalSgst: totalSgst || 0,
+      totalIgst: totalIgst || 0,
+      discountAmount: discountAmount || 0,
+      shippingCharges: shippingCharges || 0,
       totalAmount,
       paymentMethod,
       paymentStatus: paymentStatus || 'paid',
@@ -42,21 +58,89 @@ export const createPurchase = async (req, res, next) => {
       createdBy: req.user._id,
     });
 
-    // If purchase is confirmed or received, increase inventory for each item
-    if (purchase.status === 'confirmed' || purchase.status === 'received') {
-      for (const item of items) {
-        const product = await Product.findById(item.product);
-        if (product) {
-          product.stock += item.quantity;
-          product.purchasePrice = item.purchasePrice; // Update purchase price based on latest purchase
-          await product.save();
+    const finalItems = [];
+
+    for (const item of items) {
+      let productId = item.product;
+
+      // Inline product creation
+      if (item.isNewProduct && item.newProductData) {
+        const newProd = new Product({
+          ...item.newProductData,
+          stock: 0,
+        });
+        await newProd.save();
+        productId = newProd._id;
+      }
+
+      finalItems.push({
+        ...item,
+        product: productId,
+      });
+
+      if (purchase.status === 'confirmed' || purchase.status === 'received') {
+        const product = await Product.findByIdAndUpdate(
+          productId,
+          { $inc: { stock: item.quantity } },
+          { new: true }
+        );
+
+        if (!product) {
+          throw new Error(`Product not found for ID: ${productId}`);
         }
+
+        const batchNo = `BATCH-${Date.now()}-${productId.toString().slice(-4)}`;
+        
+        // StockBatch
+        const stockBatch = await StockBatch.create({
+          productId: productId,
+          purchaseId: purchase._id,
+          batchNo: batchNo,
+          quantity: item.quantity,
+          availableQty: item.quantity,
+          purchasePrice: item.purchasePrice || 0,
+          taxPercent: item.taxRate || 0,
+          discountPercent: item.discount || 0,
+          extraChargePerProduct: (shippingCharges || 0) / items.reduce((s, i) => s + i.quantity, 0),
+          salePrice: item.salesPrice || 0,
+          barcode: product.barcode,
+        });
+
+        // SalesPrice Entry
+        await SalesPrice.create({
+          productId: productId,
+          purchaseId: purchase._id,
+          batchId: stockBatch._id,
+          barcode: product.barcode || product.sku,
+          purchasePrice: item.purchasePrice || 0,
+          taxPercent: item.taxRate || 0,
+          taxAmount: item.taxAmount || 0,
+          discountPercent: item.discount || 0,
+          discountAmount: item.discountAmount || 0,
+          extraCharges: shippingCharges || 0,
+          extraChargePerProduct: (shippingCharges || 0) / items.reduce((s, i) => s + i.quantity, 0),
+          calculatedSalePrice: item.salesPrice || 0,
+          availableQty: item.quantity,
+          pricingStatus: 'active',
+        });
+
+        await recordStockMovement({
+          productId: product._id,
+          productName: product.name,
+          type: 'purchase',
+          quantity: item.quantity,
+          previousStock: product.stock - item.quantity,
+          newStock: product.stock,
+          reference: purchaseNumber,
+          referenceId: purchase._id,
+          createdBy: req.user._id,
+        });
       }
     }
 
+    purchase.items = finalItems;
     await purchase.save();
 
-    // Update supplier stats
     if (supplier && (purchase.status === 'confirmed' || purchase.status === 'received')) {
       await Supplier.findByIdAndUpdate(
         supplier,
@@ -116,7 +200,7 @@ export const getPurchases = async (req, res, next) => {
 
     const total = await Purchase.countDocuments(query);
     const purchases = await Purchase.find(query)
-      .populate('supplier', 'name mobile')
+      .populate('supplier', 'name phone')
       .populate('createdBy', 'name')
       .sort('-createdAt')
       .limit(parseInt(limit))
@@ -142,8 +226,8 @@ export const getPurchases = async (req, res, next) => {
 export const getPurchase = async (req, res, next) => {
   try {
     const purchase = await Purchase.findById(req.params.id)
-      .populate('supplier', 'name mobile address gstNumber')
-      .populate('transporter', 'name mobile vehicleNumber')
+      .populate('supplier', 'name phone address gstNumber')
+      .populate('transporter', 'name phone vehicleNumber')
       .populate('createdBy', 'name email')
       .populate('items.product', 'name sku image hsnCode unit');
 

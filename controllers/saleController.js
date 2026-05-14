@@ -1,7 +1,10 @@
 import Sale from '../models/Sale.js';
 import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
+import StockBatch from '../models/StockBatch.js';
 import mongoose from 'mongoose';
+import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
+import { recordStockMovement } from '../utils/stockMovement.js';
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -14,6 +17,9 @@ export const createSale = async (req, res, next) => {
       subtotal,
       taxRate,
       taxAmount,
+      totalCgst,
+      totalSgst,
+      totalIgst,
       discountType,
       discountValue,
       discountAmount,
@@ -25,48 +31,82 @@ export const createSale = async (req, res, next) => {
       notes,
     } = req.body;
 
-    // Validate stock availability for each item
-    for (const item of items) {
-      const product = await Product.findById(item.product);
-      if (!product) {
-        return res.status(404).json({
-          success: false,
-          message: `Product not found: ${item.product}`,
-        });
-      }
-      if (product.stock < item.quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for "${product.name}". Available: ${product.stock}, Requested: ${item.quantity}`,
-        });
-      }
-    }
-
-    // Reduce inventory for each item
     const saleItems = [];
+    
+    // Deduct stock and validate
     for (const item of items) {
-      const product = await Product.findById(item.product);
+      // 1. Check aggregate stock first
+      const product = await Product.findOne({ _id: item.product, stock: { $gte: item.quantity }, isActive: true });
+      if (!product) {
+        throw new Error(`Insufficient aggregate stock for product ${item.product}`);
+      }
+
+      // 2. Fetch appropriate batches (FIFO logic by default)
+      const batches = await StockBatch.find({
+        productId: item.product,
+        availableQty: { $gt: 0 }
+      }).sort({ createdAt: 1 });
+
+      let remainingToDeduct = item.quantity;
+      let totalPurchaseCost = 0;
+
+      for (const batch of batches) {
+        if (remainingToDeduct <= 0) break;
+
+        const deductQty = Math.min(batch.availableQty, remainingToDeduct);
+        batch.availableQty -= deductQty;
+        totalPurchaseCost += deductQty * batch.purchasePrice;
+        remainingToDeduct -= deductQty;
+
+        await batch.save();
+      }
+
+      if (remainingToDeduct > 0 && batches.length === 0) {
+        totalPurchaseCost = 0;
+        remainingToDeduct = 0;
+      } else if (remainingToDeduct > 0) {
+        throw new Error(`Insufficient batch-wise stock for "${product.name}". Required: ${item.quantity}`);
+      }
+
+      // 3. Update Aggregate Product Stock
       product.stock -= item.quantity;
       await product.save();
+
+      const avgPurchasePrice = item.quantity > 0 ? totalPurchaseCost / item.quantity : 0;
 
       saleItems.push({
         product: product._id,
         name: product.name,
         sku: product.sku,
         quantity: item.quantity,
-        unitPrice: item.unitPrice || product.sellingPrice,
-        total: (item.unitPrice || product.sellingPrice) * item.quantity,
+        unitPrice: item.unitPrice,
+        purchasePrice: avgPurchasePrice,
+        profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
+        taxRate: item.taxRate || 0,
+        cgst: item.cgst || 0,
+        sgst: item.sgst || 0,
+        igst: item.igst || 0,
+        total: item.unitPrice * item.quantity,
+        _previousStock: product.stock + item.quantity,
+        _newStock: product.stock,
       });
     }
 
+    // Generate invoice number
+    const invoiceNumber = await generateSequenceNumber('INV');
+
     // Create the sale
     const sale = new Sale({
-      items: saleItems,
+      invoiceNumber,
+      items: saleItems.map(({ _previousStock, _newStock, ...rest }) => rest),
       customer: customer || undefined,
       customerName: customerName || 'Walk-in Customer',
       subtotal,
       taxRate: taxRate || 0,
       taxAmount: taxAmount || 0,
+      totalCgst: totalCgst || 0,
+      totalSgst: totalSgst || 0,
+      totalIgst: totalIgst || 0,
       discountType: discountType || 'fixed',
       discountValue: discountValue || 0,
       discountAmount: discountAmount || 0,
@@ -80,6 +120,21 @@ export const createSale = async (req, res, next) => {
     });
 
     await sale.save();
+
+    // Record stock movements
+    for (const item of saleItems) {
+      await recordStockMovement({
+        productId: item.product,
+        productName: item.name,
+        type: 'sale',
+        quantity: -item.quantity,
+        previousStock: item._previousStock,
+        newStock: item._newStock,
+        reference: invoiceNumber,
+        referenceId: sale._id,
+        createdBy: req.user._id,
+      });
+    }
 
     // Update customer stats if customer exists
     if (customer) {
@@ -104,6 +159,9 @@ export const createSale = async (req, res, next) => {
       data: populatedSale,
     });
   } catch (error) {
+    if (error.message.includes('Insufficient') || error.message.includes('Product not found')) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     next(error);
   }
 };
@@ -182,6 +240,77 @@ export const getSale = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: sale,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Cancel sale and restore stock
+// @route   PUT /api/sales/:id/cancel
+export const cancelSale = async (req, res, next) => {
+  try {
+    const sale = await Sale.findById(req.params.id);
+
+    if (!sale) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sale not found',
+      });
+    }
+
+    if (sale.status === 'cancelled') {
+      return res.status(400).json({
+        success: false,
+        message: 'Sale is already cancelled',
+      });
+    }
+
+    // Restore stock and log movements
+    for (const item of sale.items) {
+      const product = await Product.findByIdAndUpdate(
+        item.product,
+        { $inc: { stock: item.quantity } },
+        { new: true }
+      );
+
+      if (product) {
+        await recordStockMovement({
+          productId: product._id,
+          productName: product.name,
+          type: 'cancellation',
+          quantity: item.quantity,
+          previousStock: product.stock - item.quantity,
+          newStock: product.stock,
+          reference: sale.invoiceNumber,
+          referenceId: sale._id,
+          notes: 'Sale cancelled',
+          createdBy: req.user._id,
+        });
+      }
+    }
+
+    // Update sale status
+    sale.status = 'cancelled';
+    await sale.save();
+
+    // Update customer stats if customer exists
+    if (sale.customer) {
+      await Customer.findByIdAndUpdate(
+        sale.customer,
+        {
+          $inc: {
+            totalPurchases: -1,
+            totalSpent: -sale.totalAmount,
+          },
+        }
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      data: sale,
+      message: 'Sale cancelled and stock restored successfully',
     });
   } catch (error) {
     next(error);
