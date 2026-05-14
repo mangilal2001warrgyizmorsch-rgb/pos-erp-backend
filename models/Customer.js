@@ -1,24 +1,27 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
 const customerSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: [true, 'Customer name is required'],
+      required: [true, "Customer name is required"],
       trim: true,
-      maxlength: [100, 'Name cannot exceed 100 characters'],
+      maxlength: [100, "Name cannot exceed 100 characters"],
     },
     email: {
       type: String,
       trim: true,
       lowercase: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
     },
     gstNumber: {
       type: String,
       trim: true,
       uppercase: true,
-      match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid Indian GST Number'],
+      match: [
+        /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/,
+        "Invalid Indian GST Number",
+      ],
     },
     state: {
       type: String, // E.g. "Maharashtra", "Gujarat"
@@ -30,13 +33,13 @@ const customerSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: [true, 'Phone number is required'],
+      required: [true, "Phone number is required"],
       trim: true,
     },
     address: {
       type: String,
       trim: true,
-      maxlength: [300, 'Address cannot exceed 300 characters'],
+      maxlength: [300, "Address cannot exceed 300 characters"],
     },
     totalPurchases: {
       type: Number,
@@ -63,7 +66,7 @@ const customerSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
-export default mongoose.model('Customer', customerSchema);
+export default mongoose.model("Customer", customerSchema);

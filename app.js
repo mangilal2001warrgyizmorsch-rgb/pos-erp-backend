@@ -27,6 +27,9 @@ import uploadRoutes from './routes/uploadRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js';
 import reportRoutes from './routes/reportRoutes.js';
 import salesPriceRoutes from './routes/salesPriceRoutes.js';
+import bankRoutes from './routes/bankRoutes.js';
+import loanRoutes from './routes/loanRoutes.js';
+import chequeRoutes from './routes/chequeRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,6 +92,9 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/sales-prices', salesPriceRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/bank', bankRoutes);
+app.use('/api/loans', loanRoutes);
+app.use('/api/cheques', chequeRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

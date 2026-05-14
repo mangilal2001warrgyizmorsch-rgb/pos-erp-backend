@@ -23,6 +23,35 @@ const supplierSchema = new mongoose.Schema(
       uppercase: true,
       match: [/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid Indian GST Number'],
     },
+    gstType: {
+      type: String,
+      enum: ['Unregistered/Consumer', 'Registered/Regular', 'Composition'],
+      default: 'Unregistered/Consumer',
+    },
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+    },
+    shippingAddress: {
+      type: String,
+      trim: true,
+    },
+    openingBalance: {
+      type: Number,
+      default: 0,
+    },
+    openingBalanceType: {
+      type: String,
+      enum: ['Payable', 'Receivable'],
+      default: 'Payable',
+    },
+    creditLimit: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     state: {
       type: String, // E.g. "Maharashtra", "Gujarat"
       trim: true,
