@@ -61,8 +61,38 @@ const productSchema = new mongoose.Schema(
     },
     unit: {
       type: String,
-      enum: ['piece', 'kg', 'liter', 'meter', 'box', 'dozen'],
-      default: 'piece',
+      enum: ["piece", "kg", "liter", "meter", "box", "dozen"],
+      default: "piece",
+    },
+    salesPrice: {
+      type: Number,
+      default: 0,
+    },
+    salesTaxType: {
+      type: String,
+      enum: ["with", "without"],
+      default: "without",
+    },
+    purchasePrice: {
+      type: Number,
+      default: 0,
+    },
+    purchaseTaxType: {
+      type: String,
+      enum: ["with", "without"],
+      default: "without",
+    },
+    taxRate: {
+      type: Number,
+      default: 0,
+    },
+    openingStockPrice: {
+      type: Number,
+      default: 0,
+    },
+    openingStockDate: {
+      type: Date,
+      default: Date.now,
     },
     isActive: {
       type: Boolean,

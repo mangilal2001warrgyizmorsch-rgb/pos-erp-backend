@@ -30,6 +30,7 @@ import salesPriceRoutes from './routes/salesPriceRoutes.js';
 import bankRoutes from './routes/bankRoutes.js';
 import loanRoutes from './routes/loanRoutes.js';
 import chequeRoutes from './routes/chequeRoutes.js';
+import businessRoutes from './routes/businessRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/bank', bankRoutes);
 app.use('/api/loans', loanRoutes);
 app.use('/api/cheques', chequeRoutes);
+app.use('/api/business', businessRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

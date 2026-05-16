@@ -52,6 +52,10 @@ const supplierSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    openingBalanceDate: {
+      type: Date,
+      default: Date.now,
+    },
     state: {
       type: String, // E.g. "Maharashtra", "Gujarat"
       trim: true,

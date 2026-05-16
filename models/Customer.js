@@ -18,10 +18,13 @@ const customerSchema = new mongoose.Schema(
       type: String,
       trim: true,
       uppercase: true,
-      match: [
-        /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/,
-        "Invalid Indian GST Number",
-      ],
+      validate: {
+        validator: function(v) {
+          if (!v) return true; // Allow empty
+          return /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(v);
+        },
+        message: "Invalid Indian GST Number"
+      }
     },
     state: {
       type: String, // E.g. "Maharashtra", "Gujarat"
@@ -56,12 +59,23 @@ const customerSchema = new mongoose.Schema(
     walletBalance: {
       type: Number,
       default: 0,
-      min: 0,
     },
     creditLimit: {
       type: Number,
       default: 0,
-      min: 0,
+    },
+    openingBalance: {
+      type: Number,
+      default: 0,
+    },
+    openingBalanceType: {
+      type: String,
+      enum: ["Payable", "Receivable"],
+      default: "Receivable",
+    },
+    openingBalanceDate: {
+      type: Date,
+      default: Date.now,
     },
   },
   {

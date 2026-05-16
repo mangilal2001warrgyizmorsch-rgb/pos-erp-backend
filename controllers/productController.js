@@ -115,10 +115,10 @@ export const getProductPricing = async (req, res, next) => {
         data: {
           productId: product._id,
           batchNo: 'INITIAL-STOCK',
-          purchasePrice: 0,
-          salesPrice: 0,
+          purchasePrice: product.purchasePrice || 0,
+          salesPrice: product.salesPrice || 0,
           availableQty: product.stock,
-          taxPercent: 0
+          taxPercent: product.taxRate || 0
         },
       });
     }

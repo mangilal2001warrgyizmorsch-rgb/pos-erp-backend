@@ -197,6 +197,7 @@ export const getSales = async (req, res, next) => {
 
     if (paymentMethod) query.paymentMethod = paymentMethod;
     if (status) query.status = status;
+    if (req.query.customer) query.customer = req.query.customer;
 
     const total = await Sale.countDocuments(query);
     const sales = await Sale.find(query)
