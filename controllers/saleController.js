@@ -526,3 +526,22 @@ export const getSalesReport = async (req, res, next) => {
     next(error);
   }
 };
+// @desc    Get unpaid sales for a customer
+// @route   GET /api/sales/unpaid/:customerId
+export const getUnpaidSales = async (req, res, next) => {
+  try {
+    const { customerId } = req.params;
+    const sales = await Sale.find({
+      customer: customerId,
+      paymentStatus: { $ne: 'paid' },
+      status: 'completed'
+    }).sort('-createdAt');
+
+    res.status(200).json({
+      success: true,
+      data: sales,
+    });
+  } catch (error) {
+    next(error);
+  }
+};

@@ -3,6 +3,10 @@ import Purchase from '../models/Purchase.js';
 import Expense from '../models/Expense.js';
 import Product from '../models/Product.js';
 import mongoose from 'mongoose';
+import PaymentIn from '../models/PaymentIn.js';
+import PaymentOut from '../models/PaymentOut.js';
+
+
 
 /**
  * Get date range based on period type
@@ -694,3 +698,79 @@ export const getPurchaseAnalytics = async (req, res, next) => {
     next(error);
   }
 };
+
+// ==================== CASH FLOW ANALYTICS ====================
+
+export const getCashFlowAnalytics = async (req, res, next) => {
+  try {
+    const { period = 'monthly', customStartDate, customEndDate } = req.query;
+    const { startDate, endDate } = getDateRange(period, customStartDate, customEndDate);
+    const groupFormat = getGroupFormat(period);
+
+    const [paymentInTrend, paymentOutTrend, expenseTrend] = await Promise.all([
+      PaymentIn.aggregate([
+        { $match: { date: { $gte: startDate, $lte: endDate } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: groupFormat, date: '$date' } },
+            totalInflow: { $sum: '$amountReceived' },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      PaymentOut.aggregate([
+        { $match: { date: { $gte: startDate, $lte: endDate } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: groupFormat, date: '$date' } },
+            totalOutflow: { $sum: '$amountPaid' },
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      Expense.aggregate([
+        { $match: { date: { $gte: startDate, $lte: endDate } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: groupFormat, date: '$date' } },
+            totalExpenses: { $sum: '$amount' },
+            count: { $sum: 1 }
+          }
+        }
+      ])
+    ]);
+
+    const allDates = new Set([
+      ...paymentInTrend.map(i => i._id),
+      ...paymentOutTrend.map(i => i._id),
+      ...expenseTrend.map(i => i._id)
+    ]);
+
+    const trend = Array.from(allDates).map(date => {
+      const inflow = paymentInTrend.find(i => i._id === date)?.totalInflow || 0;
+      const outflow = (paymentOutTrend.find(i => i._id === date)?.totalOutflow || 0) + 
+                      (expenseTrend.find(i => i._id === date)?.totalExpenses || 0);
+      return {
+        date,
+        inflow,
+        outflow,
+        net: inflow - outflow
+      };
+    }).sort((a, b) => a.date.localeCompare(b.date));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        summary: {
+          totalInflow: trend.reduce((sum, item) => sum + item.inflow, 0),
+          totalOutflow: trend.reduce((sum, item) => sum + item.outflow, 0),
+          netCashFlow: trend.reduce((sum, item) => sum + item.net, 0)
+        },
+        trend
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

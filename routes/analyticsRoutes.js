@@ -4,7 +4,9 @@ import {
   getSalesAnalytics,
   getRevenueAnalytics,
   getPurchaseAnalytics,
+  getCashFlowAnalytics,
 } from '../controllers/analyticsController.js';
+
 import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -23,5 +25,8 @@ router.get('/revenue', getRevenueAnalytics);
 
 // Purchase analytics
 router.get('/purchases', getPurchaseAnalytics);
+
+// Cashflow analytics
+router.get('/cashflow', getCashFlowAnalytics);
 
 export default router;

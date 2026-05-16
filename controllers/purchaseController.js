@@ -246,3 +246,22 @@ export const getPurchase = async (req, res, next) => {
     next(error);
   }
 };
+// @desc    Get unpaid purchases for a supplier
+// @route   GET /api/purchases/unpaid/:supplierId
+export const getUnpaidPurchases = async (req, res, next) => {
+  try {
+    const { supplierId } = req.params;
+    const purchases = await Purchase.find({
+      supplier: supplierId,
+      paymentStatus: { $ne: 'paid' },
+      status: { $ne: 'cancelled' }
+    }).sort('-createdAt');
+
+    res.status(200).json({
+      success: true,
+      data: purchases,
+    });
+  } catch (error) {
+    next(error);
+  }
+};

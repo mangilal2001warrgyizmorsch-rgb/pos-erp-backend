@@ -31,6 +31,11 @@ import bankRoutes from './routes/bankRoutes.js';
 import loanRoutes from './routes/loanRoutes.js';
 import chequeRoutes from './routes/chequeRoutes.js';
 import businessRoutes from './routes/businessRoutes.js';
+import paymentInRoutes from './routes/paymentInRoutes.js';
+import paymentOutRoutes from './routes/paymentOutRoutes.js';
+import cashBankRoutes from './routes/cashBankRoutes.js';
+import partyLedgerRoutes from './routes/partyLedgerRoutes.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +46,12 @@ connectDB();
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -62,8 +72,9 @@ const authLimiter = rateLimit({
   message: 'Too many login attempts from this IP, please try again after 15 minutes',
 });
 
-app.use('/api/', apiLimiter);
-app.use('/api/auth', authLimiter);
+// app.use('/api/', apiLimiter);
+// app.use('/api/auth', authLimiter);
+
 
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
@@ -97,6 +108,11 @@ app.use('/api/bank', bankRoutes);
 app.use('/api/loans', loanRoutes);
 app.use('/api/cheques', chequeRoutes);
 app.use('/api/business', businessRoutes);
+app.use('/api/payment-in', paymentInRoutes);
+app.use('/api/payment-out', paymentOutRoutes);
+app.use('/api/cash-bank', cashBankRoutes);
+app.use('/api/ledger', partyLedgerRoutes);
+
 
 // Health check
 app.get('/api/health', (req, res) => {
