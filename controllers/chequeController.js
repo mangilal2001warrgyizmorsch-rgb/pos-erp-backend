@@ -21,7 +21,7 @@ export const createCheque = async (req, res) => {
 
 export const getCheques = async (req, res) => {
   try {
-    const cheques = await Cheque.find().sort('-date');
+    const cheques = await Cheque.find().sort({ date: -1, createdAt: -1 });
     res.status(200).json({ success: true, count: cheques.length, data: cheques });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

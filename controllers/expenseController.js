@@ -1,4 +1,5 @@
 import Expense from '../models/Expense.js';
+import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
 
 // @desc    Create expense
 // @route   POST /api/expenses
@@ -11,6 +12,23 @@ export const createExpense = async (req, res, next) => {
     };
     
     const expense = await Expense.create(expenseData);
+
+    // Create central cash bank transaction log and update balance
+    const accountType = expense.paymentMethod === 'cash' ? 'cash' : 'bank';
+    await createCashBankTransaction({
+      date: expense.date || new Date(),
+      type: 'expense',
+      direction: 'out',
+      amount: expense.amount,
+      paymentMode: expense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
+      accountType,
+      description: expense.description || `Expense: ${expense.title}`,
+      referenceModule: 'expense',
+      referenceId: expense._id,
+      referenceNo: expense.reference || undefined,
+      createdBy: req.user._id
+    });
+
     res.status(201).json({
       success: true,
       data: expense,
@@ -39,7 +57,7 @@ export const getExpenses = async (req, res, next) => {
     const total = await Expense.countDocuments(query);
     const expenses = await Expense.find(query)
       .populate('createdBy', 'name')
-      .sort('-date')
+      .sort({ date: -1, createdAt: -1 })
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit));
 

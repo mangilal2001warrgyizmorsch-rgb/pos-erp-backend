@@ -9,6 +9,8 @@ import rateLimit from 'express-rate-limit';
 
 import connectDB from './config/db.js';
 import errorHandler from './middleware/errorHandler.js';
+import http from 'http';
+import { initSocket } from './utils/socket.js';
 
 // Route imports
 import authRoutes from './routes/authRoutes.js';
@@ -20,6 +22,8 @@ import supplierRoutes from './routes/supplierRoutes.js';
 import transporterRoutes from './routes/transporterRoutes.js';
 import saleRoutes from './routes/saleRoutes.js';
 import purchaseRoutes from './routes/purchaseRoutes.js';
+import saleReturnRoutes from './routes/saleReturnRoutes.js';
+import purchaseReturnRoutes from './routes/purchaseReturnRoutes.js';
 import expenseRoutes from './routes/expenseRoutes.js';
 import returnRoutes from './routes/returnRoutes.js';
 import shiftRoutes from './routes/shiftRoutes.js';
@@ -35,6 +39,8 @@ import paymentInRoutes from './routes/paymentInRoutes.js';
 import paymentOutRoutes from './routes/paymentOutRoutes.js';
 import cashBankRoutes from './routes/cashBankRoutes.js';
 import partyLedgerRoutes from './routes/partyLedgerRoutes.js';
+import inventoryRoutes from './routes/inventoryRoutes.js';
+import { reconcileLegacyLedgers } from './utils/reconcileLedgers.js';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -97,6 +103,10 @@ app.use('/api/suppliers', supplierRoutes);
 app.use('/api/transporters', transporterRoutes);
 app.use('/api/sales', saleRoutes);
 app.use('/api/purchases', purchaseRoutes);
+app.use('/api/sales-returns', saleReturnRoutes);
+app.use('/api/sale-returns', saleReturnRoutes);
+app.use('/api/purchases-returns', purchaseReturnRoutes);
+app.use('/api/purchase-returns', purchaseReturnRoutes);
 app.use('/api/expenses', expenseRoutes);
 app.use('/api/returns', returnRoutes);
 app.use('/api/shifts', shiftRoutes);
@@ -112,6 +122,7 @@ app.use('/api/payment-in', paymentInRoutes);
 app.use('/api/payment-out', paymentOutRoutes);
 app.use('/api/cash-bank', cashBankRoutes);
 app.use('/api/ledger', partyLedgerRoutes);
+app.use('/api/inventory', inventoryRoutes);
 
 
 // Health check
@@ -124,8 +135,13 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+const server = http.createServer(app);
+initSocket(server);
+
+server.listen(PORT, async () => {
   console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+  // Run legacy ledger reconciliation on startup
+  await reconcileLegacyLedgers();
 });
 
 export default app;

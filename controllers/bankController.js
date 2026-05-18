@@ -80,8 +80,68 @@ export const createTransaction = async (req, res) => {
 // @access  Private
 export const getTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find().populate('accountId', 'accountName accountNumber').sort('-date');
+    const transactions = await Transaction.find().populate('accountId', 'accountName accountNumber').sort({ createdAt: -1 });
     res.status(200).json({ success: true, count: transactions.length, data: transactions });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Get a single bank account by ID
+// @route   GET /api/bank/:id
+// @access  Private
+export const getBankAccountById = async (req, res) => {
+  try {
+    const bankAccount = await BankAccount.findById(req.params.id);
+    if (!bankAccount) {
+      return res.status(404).json({ success: false, message: 'Bank account not found' });
+    }
+    res.status(200).json({ success: true, data: bankAccount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Update a bank account details
+// @route   PUT /api/bank/:id
+// @access  Private
+export const updateBankAccount = async (req, res) => {
+  try {
+    const { accountName, accountNumber, ifscCode, openingBalance } = req.body;
+    const bankAccount = await BankAccount.findById(req.params.id);
+    if (!bankAccount) {
+      return res.status(404).json({ success: false, message: 'Bank account not found' });
+    }
+
+    bankAccount.accountName = accountName || bankAccount.accountName;
+    bankAccount.accountNumber = accountNumber || bankAccount.accountNumber;
+    bankAccount.ifscCode = ifscCode || bankAccount.ifscCode;
+    if (openingBalance !== undefined) {
+      // Recalculate balance if opening balance changes
+      const diff = Number(openingBalance) - bankAccount.openingBalance;
+      bankAccount.openingBalance = Number(openingBalance);
+      bankAccount.currentBalance += diff;
+    }
+
+    await bankAccount.save();
+    res.status(200).json({ success: true, data: bankAccount });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Delete a bank account
+// @route   DELETE /api/bank/:id
+// @access  Private
+export const deleteBankAccount = async (req, res) => {
+  try {
+    const bankAccount = await BankAccount.findById(req.params.id);
+    if (!bankAccount) {
+      return res.status(404).json({ success: false, message: 'Bank account not found' });
+    }
+
+    await BankAccount.findByIdAndDelete(req.params.id);
+    res.status(200).json({ success: true, message: 'Bank account deleted successfully' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

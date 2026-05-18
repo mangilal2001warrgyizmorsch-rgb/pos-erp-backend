@@ -2,13 +2,23 @@ import Sale from '../models/Sale.js';
 import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
 import StockBatch from '../models/StockBatch.js';
+import StockMovement from '../models/StockMovement.js';
 import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
-import { recordStockMovement } from '../utils/stockMovement.js';
+import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
+import { inventoryService } from '../services/inventoryService.js';
+import { partyLedgerService } from '../services/partyLedgerService.js';
+import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
 export const createSale = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
   try {
     const {
       items,
@@ -32,47 +42,48 @@ export const createSale = async (req, res, next) => {
     } = req.body;
 
     const saleItems = [];
-    
+    const invoiceNumber = await generateSequenceNumber('INV', session);
+
     // Deduct stock and validate
     for (const item of items) {
-      // 1. Check aggregate stock first
-      const product = await Product.findOne({ _id: item.product, stock: { $gte: item.quantity }, isActive: true });
+      // 1. Fetch appropriate batches (FIFO logic by default) to calculate average purchase price
+      const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
       if (!product) {
-        throw new Error(`Insufficient aggregate stock for product ${item.product}`);
+        throw new Error(`Product not found: ${item.product}`);
       }
 
-      // 2. Fetch appropriate batches (FIFO logic by default)
+      // Check stock before hand
+      if ((product.stock || 0) < item.quantity) {
+        throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`);
+      }
+
+      // Compute average purchase price from active FIFO batches for correct profit margins
       const batches = await StockBatch.find({
         productId: item.product,
         availableQty: { $gt: 0 }
-      }).sort({ createdAt: 1 });
+      }).sort({ createdAt: 1 }).session(session);
 
       let remainingToDeduct = item.quantity;
       let totalPurchaseCost = 0;
 
       for (const batch of batches) {
         if (remainingToDeduct <= 0) break;
-
         const deductQty = Math.min(batch.availableQty, remainingToDeduct);
-        batch.availableQty -= deductQty;
         totalPurchaseCost += deductQty * batch.purchasePrice;
         remainingToDeduct -= deductQty;
-
-        await batch.save();
       }
-
-      if (remainingToDeduct > 0 && batches.length === 0) {
-        totalPurchaseCost = 0;
-        remainingToDeduct = 0;
-      } else if (remainingToDeduct > 0) {
-        throw new Error(`Insufficient batch-wise stock for "${product.name}". Required: ${item.quantity}`);
-      }
-
-      // 3. Update Aggregate Product Stock
-      product.stock -= item.quantity;
-      await product.save();
 
       const avgPurchasePrice = item.quantity > 0 ? totalPurchaseCost / item.quantity : 0;
+
+      // 2. Call inventoryService to handle FIFO batch deduction, Product.stock update, and StockMovement log in transaction
+      await inventoryService.deductStock({
+        productId: item.product,
+        quantity: item.quantity,
+        reference: invoiceNumber,
+        referenceId: null, // assigned below after sale saves
+        notes: `Sale invoice ${invoiceNumber}`,
+        createdBy: req.user._id
+      }, session);
 
       saleItems.push({
         product: product._id,
@@ -87,18 +98,13 @@ export const createSale = async (req, res, next) => {
         sgst: item.sgst || 0,
         igst: item.igst || 0,
         total: item.unitPrice * item.quantity,
-        _previousStock: product.stock + item.quantity,
-        _newStock: product.stock,
       });
     }
 
-    // Generate invoice number
-    const invoiceNumber = await generateSequenceNumber('INV');
-
-    // Create the sale
+    // Create the sale record
     const sale = new Sale({
       invoiceNumber,
-      items: saleItems.map(({ _previousStock, _newStock, ...rest }) => rest),
+      items: saleItems,
       customer: customer || undefined,
       customerName: customerName || 'Walk-in Customer',
       subtotal,
@@ -119,22 +125,13 @@ export const createSale = async (req, res, next) => {
       cashier: req.user._id,
     });
 
-    await sale.save();
+    await sale.save({ session });
 
-    // Record stock movements
-    for (const item of saleItems) {
-      await recordStockMovement({
-        productId: item.product,
-        productName: item.name,
-        type: 'sale',
-        quantity: -item.quantity,
-        previousStock: item._previousStock,
-        newStock: item._newStock,
-        reference: invoiceNumber,
-        referenceId: sale._id,
-        createdBy: req.user._id,
-      });
-    }
+    // Update referenceIds on StockMovement records
+    await StockMovement.updateMany(
+      { reference: invoiceNumber, referenceId: null },
+      { $set: { referenceId: sale._id } }
+    ).session(session);
 
     // Update customer stats if customer exists
     if (customer) {
@@ -145,12 +142,61 @@ export const createSale = async (req, res, next) => {
             totalPurchases: 1,
             totalSpent: totalAmount,
           },
-        }
+        },
+        { session }
       );
+
+      // Always create double-entry Party Ledger entry for all customer sales
+      await partyLedgerService.createEntry({
+        partyId: customer,
+        partyType: 'Customer',
+        type: 'sale',
+        debitAmount: Number(totalAmount),
+        creditAmount: Number(amountPaid || 0),
+        referenceId: sale._id,
+        receiptNo: invoiceNumber,
+        notes: `Sale Invoice ${invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${amountPaid}`,
+        date: new Date()
+      }, session);
+    }
+
+    // Log payment in central Cash/Bank transaction log if paid
+    if (sale.amountPaid > 0) {
+      await createCashBankTransaction({
+        date: sale.createdAt || new Date(),
+        type: 'sale_payment',
+        direction: 'in',
+        amount: sale.amountPaid,
+        paymentMode: sale.paymentMethod || 'Cash',
+        accountType: (sale.paymentMethod === 'Cash' || sale.paymentMethod === 'cash') ? 'cash' : 'bank',
+        partyId: customer || undefined,
+        partyType: 'Customer',
+        referenceModule: 'sale_invoice',
+        referenceId: sale._id,
+        referenceNo: invoiceNumber,
+        description: `Payment received for Invoice ${invoiceNumber}`,
+        createdBy: req.user._id
+      }, session);
+    }
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Emit live real-time WebSocket socket broadcast
+    try {
+      emitSocketEvent('sale:created', {
+        _id: sale._id,
+        invoiceNo: invoiceNumber,
+        totalAmount,
+        customerName
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit sale socket event:', e);
     }
 
     const populatedSale = await Sale.findById(sale._id)
-      .populate('customer', 'name phone email')
+      .populate('customer', 'name phone email walletBalance')
       .populate('cashier', 'name email')
       .populate('items.product', 'name sku');
 
@@ -159,10 +205,14 @@ export const createSale = async (req, res, next) => {
       data: populatedSale,
     });
   } catch (error) {
-    if (error.message.includes('Insufficient') || error.message.includes('Product not found')) {
-      return res.status(400).json({ success: false, message: error.message });
+    if (session) {
+      await session.abortTransaction();
     }
     next(error);
+  } finally {
+    if (session) {
+      session.endSession();
+    }
   }
 };
 

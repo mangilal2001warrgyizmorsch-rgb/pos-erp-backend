@@ -12,6 +12,8 @@ import { customerValidator } from '../validators/index.js';
 
 router.use(protect);
 
+router.get('/search', getCustomers);
+
 router.route('/').get(getCustomers).post(customerValidator, createCustomer);
 router.route('/:id').get(getCustomer).put(updateCustomer).delete(deleteCustomer);
 

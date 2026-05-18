@@ -12,6 +12,8 @@ import { supplierValidator } from '../validators/index.js';
 
 router.use(protect);
 
+router.get('/search', getSuppliers);
+
 router.route('/').get(getSuppliers).post(supplierValidator, createSupplier);
 router.route('/:id').get(getSupplier).put(updateSupplier).delete(deleteSupplier);
 

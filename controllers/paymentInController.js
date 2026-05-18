@@ -6,11 +6,20 @@ import BankAccount from '../models/BankAccount.js';
 import Sale from '../models/Sale.js';
 import Counter from '../models/Counter.js';
 import mongoose from 'mongoose';
+import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
+import { partyLedgerService } from '../services/partyLedgerService.js';
+import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create a new payment in
 // @route   POST /api/payment-in
 // @access  Private
 export const createPaymentIn = async (req, res) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
   try {
     const {
       partyId,
@@ -24,19 +33,19 @@ export const createPaymentIn = async (req, res) => {
       date
     } = req.body;
 
-    const customer = await Customer.findById(partyId);
+    const customer = await Customer.findById(partyId).session(session);
     if (!customer) throw new Error('Customer not found');
 
     // 1. Generate Receipt Number
     const counter = await Counter.findOneAndUpdate(
       { _id: 'paymentIn' },
       { $inc: { seq: 1 } },
-      { new: true, upsert: true }
+      { new: true, upsert: true, session }
     );
     const receiptNo = `PAYIN-${String(counter.seq).padStart(6, '0')}`;
 
     // 2. Create PaymentIn Record
-    const paymentIn = await PaymentIn.create({
+    const paymentIn = new PaymentIn({
       receiptNo,
       partyId,
       partyName: customer.name,
@@ -50,75 +59,86 @@ export const createPaymentIn = async (req, res) => {
       date: date || Date.now(),
       createdBy: req.user._id
     });
+    await paymentIn.save({ session });
 
-    // 3. Update Cash/Bank Balance
-    let accountType = 'cash';
-    if (cashBankAccountId) {
-      accountType = 'bank';
-      await BankAccount.findByIdAndUpdate(cashBankAccountId, { $inc: { currentBalance: Number(amountReceived) } });
-    }
-
-    // 4. Create CashBankTransaction
-    await CashBankTransaction.create({
-      transactionNo: `TR-IN-${receiptNo}`,
+    // 3. Create central Cash/Bank Transaction Log and update account balance
+    await createCashBankTransaction({
+      date: date || new Date(),
       type: 'payment_in',
       direction: 'in',
       amount: amountReceived,
       paymentMode,
-      accountType,
+      accountType: cashBankAccountId ? 'bank' : 'cash',
       accountId: cashBankAccountId || undefined,
       partyId,
       partyType: 'Customer',
-      referenceModule: 'PaymentIn',
+      referenceModule: 'payment_in',
+      referenceId: paymentIn._id,
+      referenceNo: receiptNo,
+      description: description || `Payment In: ${receiptNo}`,
+      createdBy: req.user._id
+    }, session);
+
+    // 4. Update Customer Balance and Statements using unified partyLedgerService
+    await partyLedgerService.createEntry({
+      partyId,
+      partyType: 'Customer',
+      type: 'payment_in',
+      creditAmount: amountReceived,
       referenceId: paymentIn._id,
       receiptNo,
-      date: date || Date.now(),
-      notes: description
-    });
+      notes: description,
+      date: date || Date.now()
+    }, session);
 
-    // 5. Update Customer Balance
-    await Customer.findByIdAndUpdate(partyId, { $inc: { walletBalance: Number(amountReceived) } });
-
-
-    // 6. Update Linked Invoice if any
+    // 5. Update Linked Invoice if any
     if (linkedInvoiceId) {
-      const sale = await Sale.findById(linkedInvoiceId);
+      const sale = await Sale.findById(linkedInvoiceId).session(session);
       if (sale) {
         const newAmountPaid = (sale.amountPaid || 0) + Number(amountReceived);
         let paymentStatus = 'partial';
         if (newAmountPaid >= sale.totalAmount) {
           paymentStatus = 'paid';
         }
-        await Sale.findByIdAndUpdate(linkedInvoiceId, { 
-          $set: { 
-            amountPaid: newAmountPaid,
-            paymentStatus: paymentStatus
-          } 
-        });
-
+        await Sale.findByIdAndUpdate(
+          linkedInvoiceId,
+          { 
+            $set: { 
+              amountPaid: newAmountPaid,
+              paymentStatus: paymentStatus
+            } 
+          },
+          { session }
+        );
       }
     }
 
+    if (session) {
+      await session.commitTransaction();
+    }
 
-    // 7. Update PartyLedger
-    const lastLedger = await PartyLedger.findOne({ partyId }).sort({ createdAt: -1 });
-    const balanceAfter = (lastLedger ? lastLedger.balanceAfter : 0) - Number(amountReceived);
-
-    await PartyLedger.create({
-      partyId,
-      partyType: 'Customer',
-      type: 'payment_in',
-      creditAmount: amountReceived,
-      balanceAfter,
-      referenceId: paymentIn._id,
-      receiptNo,
-      date: date || Date.now(),
-      notes: description
-    });
+    // Broadcast Socket updates
+    try {
+      emitSocketEvent('paymentIn:created', {
+        _id: paymentIn._id,
+        receiptNo,
+        amountReceived,
+        customerName: customer.name
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit paymentIn socket event:', e);
+    }
 
     res.status(201).json({ success: true, data: paymentIn });
   } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
     res.status(500).json({ success: false, message: error.message });
+  } finally {
+    if (session) {
+      session.endSession();
+    }
   }
 };
 
@@ -136,7 +156,7 @@ export const getPaymentIns = async (req, res) => {
     if (partyId) query.partyId = partyId;
     if (paymentMode) query.paymentMode = paymentMode;
 
-    const payments = await PaymentIn.find(query).sort('-date').populate('partyId', 'name phone');
+    const payments = await PaymentIn.find(query).sort({ date: -1, createdAt: -1 }).populate('partyId', 'name phone');
     res.status(200).json({ success: true, data: payments });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -167,12 +187,16 @@ export const deletePaymentIn = async (req, res) => {
     if (!payment) throw new Error('Payment record not found');
 
     // Reverse the logic
+    // Reverse the balance adjustment
+    let account;
     if (payment.cashBankAccountId) {
-      const bank = await BankAccount.findById(payment.cashBankAccountId);
-      if (bank) {
-        bank.currentBalance -= payment.amountReceived;
-        await bank.save();
-      }
+      account = await BankAccount.findById(payment.cashBankAccountId);
+    } else {
+      account = await BankAccount.findOne({ accountType: 'cash', isDefault: true });
+    }
+    if (account) {
+      account.currentBalance -= payment.amountReceived;
+      await account.save({ validateBeforeSave: false });
     }
 
     const customer = await Customer.findById(payment.partyId);

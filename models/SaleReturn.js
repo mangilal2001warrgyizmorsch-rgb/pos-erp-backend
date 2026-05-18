@@ -65,36 +65,17 @@ const saleReturnItemSchema = new mongoose.Schema({
   },
 });
 
-const salesReturnSchema = new mongoose.Schema(
+const saleReturnSchema = new mongoose.Schema(
   {
     creditNoteNo: {
       type: String,
       required: true,
       unique: true,
-      trim: true,
     },
-    returnNumber: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-    },
-    sale: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Sale',
-      required: true,
-    },
-    invoiceNumber: {
-      type: String,
-      required: true,
-    },
-    invoiceDate: {
-      type: Date,
-      required: true,
-    },
-    customer: {
+    customerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Customer',
+      required: true,
     },
     customerName: {
       type: String,
@@ -112,6 +93,19 @@ const salesReturnSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    originalInvoiceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Sale',
+      required: true,
+    },
+    originalInvoiceNo: {
+      type: String,
+      required: true,
+    },
+    invoiceDate: {
+      type: Date,
+      required: true,
+    },
     returnDate: {
       type: Date,
       default: Date.now,
@@ -124,7 +118,6 @@ const salesReturnSchema = new mongoose.Schema(
     subtotal: {
       type: Number,
       required: true,
-      min: 0,
     },
     totalDiscount: {
       type: Number,
@@ -141,12 +134,6 @@ const salesReturnSchema = new mongoose.Schema(
     grandTotal: {
       type: Number,
       required: true,
-      min: 0,
-    },
-    refundMethod: {
-      type: String,
-      enum: ['cash', 'bank', 'credit_note', 'wallet'],
-      required: true,
     },
     refundType: {
       type: String,
@@ -155,7 +142,7 @@ const salesReturnSchema = new mongoose.Schema(
     },
     paymentMode: {
       type: String,
-      enum: ['Cash', 'UPI', 'Bank', 'Card', 'Wallet', 'Credit'],
+      enum: ['Cash', 'UPI', 'Bank', 'Card', 'Wallet'],
       default: 'Cash',
     },
     cashBankAccountId: {
@@ -174,11 +161,6 @@ const salesReturnSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    refundStatus: {
-      type: String,
-      enum: ['pending', 'completed', 'failed'],
-      default: 'completed',
-    },
     status: {
       type: String,
       enum: ['draft', 'issued', 'partially_refunded', 'refunded', 'adjusted', 'cancelled'],
@@ -186,17 +168,11 @@ const salesReturnSchema = new mongoose.Schema(
     },
     notes: {
       type: String,
-      trim: true,
       default: '',
     },
     attachments: {
       type: [String],
       default: [],
-    },
-    cashier: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -210,10 +186,9 @@ const salesReturnSchema = new mongoose.Schema(
 );
 
 // Indexes for queries
-salesReturnSchema.index({ creditNoteNo: 1, returnNumber: 1 });
-salesReturnSchema.index({ sale: 1, customer: 1, createdAt: -1 });
-salesReturnSchema.index({ customer: 1, createdAt: -1 });
-salesReturnSchema.index({ status: 1, createdAt: -1 });
-salesReturnSchema.index({ invoiceNumber: 1 });
+saleReturnSchema.index({ creditNoteNo: 1, customerId: 1, createdAt: -1 });
+saleReturnSchema.index({ originalInvoiceId: 1 });
+saleReturnSchema.index({ status: 1, createdAt: -1 });
+saleReturnSchema.index({ customerId: 1, createdAt: -1 });
 
-export default mongoose.model('SalesReturn', salesReturnSchema);
+export default mongoose.model('SaleReturn', saleReturnSchema);

@@ -6,11 +6,20 @@ import BankAccount from '../models/BankAccount.js';
 import Purchase from '../models/Purchase.js';
 import Counter from '../models/Counter.js';
 import mongoose from 'mongoose';
+import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
+import { partyLedgerService } from '../services/partyLedgerService.js';
+import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create a new payment out
 // @route   POST /api/payment-out
 // @access  Private
 export const createPaymentOut = async (req, res) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
   try {
     const {
       partyId,
@@ -24,19 +33,19 @@ export const createPaymentOut = async (req, res) => {
       date
     } = req.body;
 
-    const supplier = await Supplier.findById(partyId);
+    const supplier = await Supplier.findById(partyId).session(session);
     if (!supplier) throw new Error('Supplier not found');
 
     // 1. Generate Receipt Number
     const counter = await Counter.findOneAndUpdate(
       { _id: 'paymentOut' },
       { $inc: { seq: 1 } },
-      { new: true, upsert: true }
+      { new: true, upsert: true, session }
     );
     const receiptNo = `PAYOUT-${String(counter.seq).padStart(6, '0')}`;
 
     // 2. Create PaymentOut Record
-    const paymentOut = await PaymentOut.create({
+    const paymentOut = new PaymentOut({
       receiptNo,
       partyId,
       partyName: supplier.name,
@@ -50,75 +59,86 @@ export const createPaymentOut = async (req, res) => {
       date: date || Date.now(),
       createdBy: req.user._id
     });
+    await paymentOut.save({ session });
 
-    // 3. Update Cash/Bank Balance
-    let accountType = 'cash';
-    if (cashBankAccountId) {
-      accountType = 'bank';
-      await BankAccount.findByIdAndUpdate(cashBankAccountId, { $inc: { currentBalance: -Number(amountPaid) } });
-    }
-
-    // 4. Create CashBankTransaction
-    await CashBankTransaction.create({
-      transactionNo: `TR-OUT-${receiptNo}`,
+    // 3. Create central Cash/Bank Transaction Log and update account balance
+    await createCashBankTransaction({
+      date: date || new Date(),
       type: 'payment_out',
       direction: 'out',
       amount: amountPaid,
       paymentMode,
-      accountType,
+      accountType: cashBankAccountId ? 'bank' : 'cash',
       accountId: cashBankAccountId || undefined,
       partyId,
       partyType: 'Supplier',
-      referenceModule: 'PaymentOut',
+      referenceModule: 'payment_out',
+      referenceId: paymentOut._id,
+      referenceNo: receiptNo,
+      description: description || `Payment Out: ${receiptNo}`,
+      createdBy: req.user._id
+    }, session);
+
+    // 4. Update Supplier Balance and Statements using unified partyLedgerService
+    await partyLedgerService.createEntry({
+      partyId,
+      partyType: 'Supplier',
+      type: 'payment_out',
+      debitAmount: amountPaid,
       referenceId: paymentOut._id,
       receiptNo,
-      date: date || Date.now(),
-      notes: description
-    });
+      notes: description,
+      date: date || Date.now()
+    }, session);
 
-    // 5. Update Supplier Balance
-    await Supplier.findByIdAndUpdate(partyId, { $inc: { outstandingBalance: -Number(amountPaid) } });
-
-
-    // 6. Update Linked Purchase if any
+    // 5. Update Linked Purchase if any
     if (linkedPurchaseId) {
-      const purchase = await Purchase.findById(linkedPurchaseId);
+      const purchase = await Purchase.findById(linkedPurchaseId).session(session);
       if (purchase) {
         const newAmountPaid = (purchase.amountPaid || 0) + Number(amountPaid);
         let paymentStatus = 'partial';
         if (newAmountPaid >= purchase.totalAmount) {
           paymentStatus = 'paid';
         }
-        await Purchase.findByIdAndUpdate(linkedPurchaseId, { 
-          $set: { 
-            amountPaid: newAmountPaid,
-            paymentStatus: paymentStatus
-          } 
-        });
-
+        await Purchase.findByIdAndUpdate(
+          linkedPurchaseId,
+          { 
+            $set: { 
+              amountPaid: newAmountPaid,
+              paymentStatus: paymentStatus
+            } 
+          },
+          { session }
+        );
       }
     }
 
+    if (session) {
+      await session.commitTransaction();
+    }
 
-    // 7. Update PartyLedger
-    const lastLedger = await PartyLedger.findOne({ partyId }).sort({ createdAt: -1 });
-    const balanceAfter = (lastLedger ? lastLedger.balanceAfter : 0) - Number(amountPaid);
-
-    await PartyLedger.create({
-      partyId,
-      partyType: 'Supplier',
-      type: 'payment_out',
-      debitAmount: amountPaid,
-      balanceAfter,
-      referenceId: paymentOut._id,
-      receiptNo,
-      date: date || Date.now(),
-      notes: description
-    });
+    // Broadcast Socket updates
+    try {
+      emitSocketEvent('paymentOut:created', {
+        _id: paymentOut._id,
+        receiptNo,
+        amountPaid,
+        supplierName: supplier.name
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit paymentOut socket event:', e);
+    }
 
     res.status(201).json({ success: true, data: paymentOut });
   } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
     res.status(500).json({ success: false, message: error.message });
+  } finally {
+    if (session) {
+      session.endSession();
+    }
   }
 };
 
@@ -136,7 +156,7 @@ export const getPaymentOuts = async (req, res) => {
     if (partyId) query.partyId = partyId;
     if (paymentMode) query.paymentMode = paymentMode;
 
-    const payments = await PaymentOut.find(query).sort('-date').populate('partyId', 'name phone');
+    const payments = await PaymentOut.find(query).sort({ date: -1, createdAt: -1 }).populate('partyId', 'name phone');
     res.status(200).json({ success: true, data: payments });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -167,12 +187,16 @@ export const deletePaymentOut = async (req, res) => {
     if (!payment) throw new Error('Payment record not found');
 
     // Reverse the logic
+    // Reverse the balance adjustment
+    let account;
     if (payment.cashBankAccountId) {
-      const bank = await BankAccount.findById(payment.cashBankAccountId);
-      if (bank) {
-        bank.currentBalance += payment.amountPaid;
-        await bank.save();
-      }
+      account = await BankAccount.findById(payment.cashBankAccountId);
+    } else {
+      account = await BankAccount.findOne({ accountType: 'cash', isDefault: true });
+    }
+    if (account) {
+      account.currentBalance += payment.amountPaid;
+      await account.save({ validateBeforeSave: false });
     }
 
     const supplier = await Supplier.findById(payment.partyId);

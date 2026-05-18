@@ -64,7 +64,6 @@ creditNoteSchema.pre('save', function (next) {
   next();
 });
 
-creditNoteSchema.index({ creditNoteNumber: 1 });
 creditNoteSchema.index({ customer: 1, status: 1 });
 
 export default mongoose.model('CreditNote', creditNoteSchema);

@@ -2,15 +2,22 @@ import Purchase from '../models/Purchase.js';
 import Product from '../models/Product.js';
 import Supplier from '../models/Supplier.js';
 import StockBatch from '../models/StockBatch.js';
+import StockMovement from '../models/StockMovement.js';
 import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
-import { recordStockMovement } from '../utils/stockMovement.js';
-
-// @desc    Create purchase (with inventory increase)
-// @route   POST /api/purchases
+import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
 import SalesPrice from '../models/SalesPrice.js';
+import { inventoryService } from '../services/inventoryService.js';
+import { partyLedgerService } from '../services/partyLedgerService.js';
+import { emitSocketEvent } from '../utils/socket.js';
 
 export const createPurchase = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
   try {
     const {
       items,
@@ -33,8 +40,9 @@ export const createPurchase = async (req, res, next) => {
       notes,
     } = req.body;
 
-    const purchaseNumber = await generateSequenceNumber('PUR');
+    const purchaseNumber = await generateSequenceNumber('PUR', session);
 
+    // Instantiate Purchase record
     const purchase = new Purchase({
       purchaseNumber,
       items: [], // We'll populate this
@@ -59,17 +67,20 @@ export const createPurchase = async (req, res, next) => {
     });
 
     const finalItems = [];
+    const confirmedReceipt = purchase.status === 'confirmed' || purchase.status === 'received';
+    const totalQty = items.reduce((s, i) => s + Number(i.quantity || 0), 0);
+    const shippingPerItem = totalQty > 0 ? (shippingCharges || 0) / totalQty : 0;
 
     for (const item of items) {
       let productId = item.product;
 
-      // Inline product creation
+      // Inline product creation if new
       if (item.isNewProduct && item.newProductData) {
         const newProd = new Product({
           ...item.newProductData,
           stock: 0,
         });
-        await newProd.save();
+        await newProd.save({ session });
         productId = newProd._id;
       }
 
@@ -78,83 +89,113 @@ export const createPurchase = async (req, res, next) => {
         product: productId,
       });
 
-      if (purchase.status === 'confirmed' || purchase.status === 'received') {
-        const product = await Product.findByIdAndUpdate(
+      if (confirmedReceipt) {
+        const batchNo = item.batchNo || `BATCH-${Date.now()}-${productId.toString().slice(-4)}`;
+
+        // Call inventoryService.addStock to create batch, add Product.stock, and save StockMovement record inside the session
+        const { batch } = await inventoryService.addStock({
           productId,
-          { $inc: { stock: item.quantity } },
-          { new: true }
-        );
-
-        if (!product) {
-          throw new Error(`Product not found for ID: ${productId}`);
-        }
-
-        const batchNo = `BATCH-${Date.now()}-${productId.toString().slice(-4)}`;
-        
-        // StockBatch
-        const stockBatch = await StockBatch.create({
-          productId: productId,
           purchaseId: purchase._id,
-          batchNo: batchNo,
+          batchNo,
           quantity: item.quantity,
-          availableQty: item.quantity,
           purchasePrice: item.purchasePrice || 0,
           taxPercent: item.taxRate || 0,
           discountPercent: item.discount || 0,
-          extraChargePerProduct: (shippingCharges || 0) / items.reduce((s, i) => s + i.quantity, 0),
+          extraChargePerProduct: shippingPerItem,
           salePrice: item.salesPrice || 0,
-          barcode: product.barcode,
-        });
+          expiryDate: item.expiryDate,
+          barcode: item.barcode,
+          reference: purchaseNumber,
+          notes: `Purchase receipt: ${purchaseNumber}`,
+          createdBy: req.user._id
+        }, session);
 
-        // SalesPrice Entry
-        await SalesPrice.create({
+        // SalesPrice Entry for billing strategies
+        await SalesPrice.create([{
           productId: productId,
           purchaseId: purchase._id,
-          batchId: stockBatch._id,
-          barcode: product.barcode || product.sku,
+          batchId: batch._id,
+          barcode: item.barcode || productId.toString(),
           purchasePrice: item.purchasePrice || 0,
           taxPercent: item.taxRate || 0,
           taxAmount: item.taxAmount || 0,
           discountPercent: item.discount || 0,
           discountAmount: item.discountAmount || 0,
           extraCharges: shippingCharges || 0,
-          extraChargePerProduct: (shippingCharges || 0) / items.reduce((s, i) => s + i.quantity, 0),
+          extraChargePerProduct: shippingPerItem,
           calculatedSalePrice: item.salesPrice || 0,
           availableQty: item.quantity,
           pricingStatus: 'active',
-        });
-
-        await recordStockMovement({
-          productId: product._id,
-          productName: product.name,
-          type: 'purchase',
-          quantity: item.quantity,
-          previousStock: product.stock - item.quantity,
-          newStock: product.stock,
-          reference: purchaseNumber,
-          referenceId: purchase._id,
-          createdBy: req.user._id,
-        });
+        }], { session });
       }
     }
 
     purchase.items = finalItems;
-    await purchase.save();
+    await purchase.save({ session });
 
-    if (supplier && (purchase.status === 'confirmed' || purchase.status === 'received')) {
+    // Update supplier balance and statements if supplier exists
+    if (supplier && confirmedReceipt) {
       await Supplier.findByIdAndUpdate(
         supplier,
         {
           $inc: {
             totalPurchases: totalAmount,
-            outstandingBalance: paymentStatus !== 'paid' ? (totalAmount - amountPaid) : 0,
           },
-        }
+        },
+        { session }
       );
+
+      // Create double-entry Party Ledger entry for all purchases associated with a supplier
+      await partyLedgerService.createEntry({
+        partyId: supplier,
+        partyType: 'Supplier',
+        type: 'purchase',
+        creditAmount: Number(totalAmount),
+        debitAmount: Number(amountPaid || 0),
+        referenceId: purchase._id,
+        receiptNo: purchaseNumber,
+        notes: `Purchase Bill ${purchaseNumber}. Total: ₹${totalAmount}, Paid: ₹${amountPaid}`,
+        date: new Date()
+      }, session);
+    }
+
+    // Log payment in central Cash/Bank transaction log if paid
+    if (purchase.amountPaid > 0) {
+      await createCashBankTransaction({
+        date: purchase.createdAt || new Date(),
+        type: 'purchase_payment',
+        direction: 'out',
+        amount: purchase.amountPaid,
+        paymentMode: purchase.paymentMethod || 'Cash',
+        accountType: (purchase.paymentMethod === 'Cash' || purchase.paymentMethod === 'cash') ? 'cash' : 'bank',
+        partyId: supplier || undefined,
+        partyType: 'Supplier',
+        referenceModule: 'purchase_bill',
+        referenceId: purchase._id,
+        referenceNo: purchaseNumber,
+        description: `Payment made for Purchase bill ${purchaseNumber}`,
+        createdBy: req.user._id
+      }, session);
+    }
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Broadcast live WebSocket update
+    try {
+      emitSocketEvent('purchase:created', {
+        _id: purchase._id,
+        purchaseNo: purchaseNumber,
+        totalAmount,
+        supplierId: supplier
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit purchase event:', e);
     }
 
     const populatedPurchase = await Purchase.findById(purchase._id)
-      .populate('supplier', 'name mobile gstNumber')
+      .populate('supplier', 'name mobile gstNumber outstandingBalance')
       .populate('transporter', 'name vehicleNumber')
       .populate('createdBy', 'name email')
       .populate('items.product', 'name sku');
@@ -164,7 +205,14 @@ export const createPurchase = async (req, res, next) => {
       data: populatedPurchase,
     });
   } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
     next(error);
+  } finally {
+    if (session) {
+      session.endSession();
+    }
   }
 };
 
