@@ -1,6 +1,7 @@
 import Product from '../models/Product.js';
 import StockBatch from '../models/StockBatch.js';
 import SalesPrice from '../models/SalesPrice.js';
+import StockMovement from '../models/StockMovement.js';
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -167,6 +168,49 @@ export const getProductByBarcode = async (req, res, next) => {
 export const createProduct = async (req, res, next) => {
   try {
     const product = await Product.create(req.body);
+    
+    // Create stock batch and stock movement if stock > 0
+    if (product.stock > 0) {
+      const batchNo = `INITIAL-STOCK-${product._id.toString().slice(-4).toUpperCase()}`;
+      
+      // 1. Create StockBatch
+      const batch = await StockBatch.create({
+        productId: product._id,
+        batchNo,
+        quantity: product.stock,
+        availableQty: product.stock,
+        purchasePrice: product.purchasePrice || 0,
+        taxPercent: product.taxRate || 0,
+        salePrice: product.salesPrice || product.purchasePrice || 0,
+        barcode: product.barcode || product.sku
+      });
+
+      // 2. Create SalesPrice Record
+      await SalesPrice.create({
+        productId: product._id,
+        batchId: batch._id,
+        barcode: product.barcode || product.sku,
+        purchasePrice: product.purchasePrice || 0,
+        taxPercent: product.taxRate || 0,
+        calculatedSalePrice: product.salesPrice || product.purchasePrice || 0,
+        availableQty: product.stock,
+        pricingStatus: 'active',
+      });
+
+      // 3. Create StockMovement
+      await StockMovement.create({
+        product: product._id,
+        productName: product.name,
+        type: 'adjustment',
+        quantity: product.stock,
+        previousStock: 0,
+        newStock: product.stock,
+        reference: 'INITIAL-STOCK',
+        notes: 'Initial opening stock entry',
+        createdBy: req.user?._id || product._id
+      });
+    }
+
     const populated = await product.populate('category', 'name');
 
     res.status(201).json({
@@ -182,6 +226,9 @@ export const createProduct = async (req, res, next) => {
 // @route   PUT /api/products/:id
 export const updateProduct = async (req, res, next) => {
   try {
+    const oldProduct = await Product.findById(req.params.id);
+    const oldStock = oldProduct ? (oldProduct.stock || 0) : 0;
+
     const product = await Product.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
@@ -191,6 +238,53 @@ export const updateProduct = async (req, res, next) => {
       return res.status(404).json({
         success: false,
         message: 'Product not found',
+      });
+    }
+
+    const newStock = product.stock || 0;
+    const diff = newStock - oldStock;
+
+    if (diff !== 0) {
+      const isPositive = diff > 0;
+      const batchNo = `ADJ-${Date.now()}-${product._id.toString().slice(-4).toUpperCase()}`;
+
+      if (isPositive) {
+        // 1. Create StockBatch for the new added quantity
+        const batch = await StockBatch.create({
+          productId: product._id,
+          batchNo,
+          quantity: diff,
+          availableQty: diff,
+          purchasePrice: product.purchasePrice || 0,
+          taxPercent: product.taxRate || 0,
+          salePrice: product.salesPrice || product.purchasePrice || 0,
+          barcode: product.barcode || product.sku
+        });
+
+        // 2. Create SalesPrice Record
+        await SalesPrice.create({
+          productId: product._id,
+          batchId: batch._id,
+          barcode: product.barcode || product.sku,
+          purchasePrice: product.purchasePrice || 0,
+          taxPercent: product.taxRate || 0,
+          calculatedSalePrice: product.salesPrice || product.purchasePrice || 0,
+          availableQty: diff,
+          pricingStatus: 'active',
+        });
+      }
+
+      // 3. Create StockMovement
+      await StockMovement.create({
+        product: product._id,
+        productName: product.name,
+        type: 'adjustment',
+        quantity: diff,
+        previousStock: oldStock,
+        newStock: newStock,
+        reference: 'STOCK-ADJUSTMENT',
+        notes: `Stock adjusted by ${diff > 0 ? '+' : ''}${diff}. Opening stock update.`,
+        createdBy: req.user?._id || product._id
       });
     }
 

@@ -38,6 +38,7 @@ export const createPurchase = async (req, res, next) => {
       amountPaid,
       status,
       notes,
+      cashBankAccountId,
     } = req.body;
 
     const purchaseNumber = await generateSequenceNumber('PUR', session);
@@ -63,6 +64,7 @@ export const createPurchase = async (req, res, next) => {
       amountPaid: amountPaid || totalAmount,
       status: status || 'confirmed',
       notes,
+      cashBankAccountId,
       createdBy: req.user._id,
     });
 
@@ -168,6 +170,7 @@ export const createPurchase = async (req, res, next) => {
         amount: purchase.amountPaid,
         paymentMode: purchase.paymentMethod || 'Cash',
         accountType: (purchase.paymentMethod === 'Cash' || purchase.paymentMethod === 'cash') ? 'cash' : 'bank',
+        accountId: purchase.cashBankAccountId || undefined,
         partyId: supplier || undefined,
         partyType: 'Supplier',
         referenceModule: 'purchase_bill',

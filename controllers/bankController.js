@@ -32,7 +32,7 @@ export const createBankAccount = async (req, res) => {
 // @access  Private
 export const getBankAccounts = async (req, res) => {
   try {
-    const accounts = await BankAccount.find();
+    const accounts = await BankAccount.find({ accountType: 'bank' });
     res.status(200).json({ success: true, count: accounts.length, data: accounts });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });

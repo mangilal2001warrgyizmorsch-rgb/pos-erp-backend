@@ -30,6 +30,18 @@ const chequeSchema = new mongoose.Schema({
     type: String,
     enum: ['Pending', 'Cleared', 'Bounced'],
     default: 'Pending',
+  },
+  clearanceAccountType: {
+    type: String,
+    enum: ['cash', 'bank'],
+  },
+  clearanceAccountId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BankAccount',
+  },
+  clearanceTransactionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'CashBankTransaction',
   }
 }, {
   timestamps: true,

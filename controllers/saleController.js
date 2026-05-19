@@ -5,7 +5,7 @@ import StockBatch from '../models/StockBatch.js';
 import StockMovement from '../models/StockMovement.js';
 import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
-import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
+import { createCashBankTransaction, reverseReferenceTransaction } from '../services/cashBankTransactionService.js';
 import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
@@ -39,6 +39,7 @@ export const createSale = async (req, res, next) => {
       amountPaid,
       changeAmount,
       notes,
+      cashBankAccountId,
     } = req.body;
 
     const saleItems = [];
@@ -122,6 +123,7 @@ export const createSale = async (req, res, next) => {
       amountPaid: amountPaid || totalAmount,
       changeAmount: changeAmount || 0,
       notes,
+      cashBankAccountId,
       cashier: req.user._id,
     });
 
@@ -169,6 +171,7 @@ export const createSale = async (req, res, next) => {
         amount: sale.amountPaid,
         paymentMode: sale.paymentMethod || 'Cash',
         accountType: (sale.paymentMethod === 'Cash' || sale.paymentMethod === 'cash') ? 'cash' : 'bank',
+        accountId: sale.cashBankAccountId || undefined,
         partyId: customer || undefined,
         partyType: 'Customer',
         referenceModule: 'sale_invoice',
@@ -257,9 +260,37 @@ export const getSales = async (req, res, next) => {
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit));
 
+    // Calculate totals for matching query
+    const totalsAggregation = await Sale.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: '$totalAmount' },
+          amountPaid: { $sum: '$amountPaid' },
+          balanceAmount: {
+            $sum: {
+              $cond: [
+                { $gt: ['$totalAmount', '$amountPaid'] },
+                { $subtract: ['$totalAmount', '$amountPaid'] },
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]);
+
+    const totals = totalsAggregation[0] || { totalAmount: 0, amountPaid: 0, balanceAmount: 0 };
+
     res.status(200).json({
       success: true,
       data: sales,
+      totals: {
+        totalAmount: totals.totalAmount || 0,
+        amountPaid: totals.amountPaid || 0,
+        balanceAmount: totals.balanceAmount || 0
+      },
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -340,6 +371,9 @@ export const cancelSale = async (req, res, next) => {
         });
       }
     }
+
+    // Reverse the cash/bank transaction
+    await reverseReferenceTransaction('sale_invoice', sale._id, req.user._id, 'Sale cancelled');
 
     // Update sale status
     sale.status = 'cancelled';

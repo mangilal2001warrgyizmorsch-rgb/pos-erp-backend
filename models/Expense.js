@@ -37,6 +37,10 @@ const expenseSchema = new mongoose.Schema(
       enum: ['cash', 'card', 'upi', 'bank_transfer'],
       default: 'cash',
     },
+    cashBankAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+    },
     reference: {
       type: String,
       trim: true,

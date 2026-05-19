@@ -109,6 +109,10 @@ const purchaseSchema = new mongoose.Schema(
       enum: ['cash', 'card', 'upi', 'bank_transfer', 'credit'],
       default: 'cash',
     },
+    cashBankAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'BankAccount',
+    },
     paymentStatus: {
       type: String,
       enum: ['paid', 'pending', 'partial'],

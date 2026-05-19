@@ -22,7 +22,8 @@ const cashBankTransactionSchema = new mongoose.Schema({
       "opening_cash",
       "closing_cash",
       "adjustment",
-      "reversal"
+      "reversal",
+      "cheque_clearance"
     ]
   },
   direction: { type: String, required: true, enum: ["in", "out"] },
@@ -52,7 +53,8 @@ const cashBankTransactionSchema = new mongoose.Schema({
       'PaymentOut',
       'Manual',
       'SalesReturn',
-      'PurchaseReturn'
+      'PurchaseReturn',
+      'cheque'
     ]
   },
   referenceId: { type: mongoose.Schema.Types.ObjectId },

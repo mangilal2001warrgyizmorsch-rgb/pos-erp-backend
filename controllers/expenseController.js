@@ -1,5 +1,5 @@
 import Expense from '../models/Expense.js';
-import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
+import { createCashBankTransaction, reverseReferenceTransaction } from '../services/cashBankTransactionService.js';
 
 // @desc    Create expense
 // @route   POST /api/expenses
@@ -22,6 +22,7 @@ export const createExpense = async (req, res, next) => {
       amount: expense.amount,
       paymentMode: expense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
       accountType,
+      accountId: expense.cashBankAccountId || undefined,
       description: expense.description || `Expense: ${expense.title}`,
       referenceModule: 'expense',
       referenceId: expense._id,
@@ -103,17 +104,41 @@ export const getExpense = async (req, res, next) => {
 // @route   PUT /api/expenses/:id
 export const updateExpense = async (req, res, next) => {
   try {
-    const expense = await Expense.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    });
-
-    if (!expense) {
+    const oldExpense = await Expense.findById(req.params.id);
+    if (!oldExpense) {
       return res.status(404).json({
         success: false,
         message: 'Expense not found',
       });
     }
+
+    // Reverse old cash/bank transaction
+    await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated');
+
+    const expense = await Expense.findByIdAndUpdate(req.params.id, {
+      ...req.body,
+      categoryName: req.body.category || oldExpense.categoryName,
+    }, {
+      new: true,
+      runValidators: true,
+    });
+
+    // Create central cash bank transaction log and update balance
+    const accountType = expense.paymentMethod === 'cash' ? 'cash' : 'bank';
+    await createCashBankTransaction({
+      date: expense.date || new Date(),
+      type: 'expense',
+      direction: 'out',
+      amount: expense.amount,
+      paymentMode: expense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
+      accountType,
+      accountId: expense.cashBankAccountId || undefined,
+      description: expense.description || `Expense: ${expense.title}`,
+      referenceModule: 'expense',
+      referenceId: expense._id,
+      referenceNo: expense.reference || undefined,
+      createdBy: req.user._id
+    });
 
     res.status(200).json({
       success: true,
@@ -128,7 +153,7 @@ export const updateExpense = async (req, res, next) => {
 // @route   DELETE /api/expenses/:id
 export const deleteExpense = async (req, res, next) => {
   try {
-    const expense = await Expense.findByIdAndDelete(req.params.id);
+    const expense = await Expense.findById(req.params.id);
 
     if (!expense) {
       return res.status(404).json({
@@ -136,6 +161,11 @@ export const deleteExpense = async (req, res, next) => {
         message: 'Expense not found',
       });
     }
+
+    // Reverse the cash/bank transaction
+    await reverseReferenceTransaction('expense', expense._id, req.user._id, 'Expense deleted');
+
+    await Expense.findByIdAndDelete(req.params.id);
 
     res.status(200).json({
       success: true,

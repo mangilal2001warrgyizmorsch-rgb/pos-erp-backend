@@ -2,17 +2,18 @@ import CashBankTransaction from '../models/CashBankTransaction.js';
 import BankAccount from '../models/BankAccount.js';
 import Customer from '../models/Customer.js';
 import Supplier from '../models/Supplier.js';
+import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 /**
- * Ensure default Cash In Hand account exists
+ * Ensure default Cash account exists
  */
 export const ensureDefaultAccounts = async (session = null) => {
   let cashAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
   if (!cashAccount) {
     const created = await BankAccount.create([{
-      accountName: 'Cash In Hand',
+      accountName: 'Cash',
       accountType: 'cash',
       openingBalance: 0,
       currentBalance: 0,
@@ -20,8 +21,23 @@ export const ensureDefaultAccounts = async (session = null) => {
       status: 'active'
     }], { session });
     cashAccount = created[0];
-    console.log('[Seeding] Seeded default Cash In Hand account successfully');
+    console.log('[Seeding] Seeded default Cash account successfully');
   }
+
+  let bankAccount = await BankAccount.findOne({ accountType: 'bank' }).session(session);
+  if (!bankAccount) {
+    await BankAccount.create([{
+      accountName: 'Main Bank Account',
+      accountType: 'bank',
+      openingBalance: 0,
+      currentBalance: 0,
+      isDefault: true,
+      status: 'active',
+      bankName: 'General Bank'
+    }], { session });
+    console.log('[Seeding] Seeded default Main Bank Account successfully');
+  }
+
   return cashAccount;
 };
 
@@ -92,9 +108,19 @@ export const createCashBankTransaction = async ({
 
   // 1. Resolve Account
   let account;
+  await ensureDefaultAccounts(session);
+
   if (accountType === 'cash') {
-    const defaultCash = await ensureDefaultAccounts(session);
-    accountId = accountId || defaultCash._id;
+    const defaultCash = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
+    accountId = accountId || (defaultCash ? defaultCash._id : null);
+  } else if (accountType === 'bank') {
+    if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
+      const defaultBank = await BankAccount.findOne({ accountType: 'bank', isDefault: true }).session(session) || 
+                          await BankAccount.findOne({ accountType: 'bank', status: 'active' }).session(session);
+      if (defaultBank) {
+        accountId = defaultBank._id;
+      }
+    }
   }
 
   if (accountId) {
@@ -124,6 +150,9 @@ export const createCashBankTransaction = async ({
     if (direction === 'in') {
       account.currentBalance += Number(amount);
     } else if (direction === 'out') {
+      if (account.accountType === 'cash' && (account.currentBalance - Number(amount)) < 0) {
+        throw new Error('Insufficient cash balance. Transaction cannot proceed.');
+      }
       account.currentBalance -= Number(amount);
     }
     await account.save({ session, validateBeforeSave: false });
@@ -143,7 +172,7 @@ export const createCashBankTransaction = async ({
     paymentMode,
     accountType,
     accountId: accountId || null,
-    accountName: account ? account.accountName : (accountType === 'cash' ? 'Cash In Hand' : ''),
+    accountName: account ? account.accountName : (accountType === 'cash' ? 'Cash' : ''),
     partyId: partyId || null,
     partyName,
     partyType,
@@ -253,4 +282,20 @@ export const reverseTransactionService = async (transactionId, reversedBy, rever
   });
 
   return { original, reversal };
+};
+
+/**
+ * Find and reverse transaction by reference Module & ID
+ */
+export const reverseReferenceTransaction = async (referenceModule, referenceId, reversedBy, reversalReason, session = null) => {
+  const transaction = await CashBankTransaction.findOne({
+    referenceModule,
+    referenceId,
+    status: 'completed'
+  }).session(session);
+  
+  if (transaction) {
+    return await reverseTransactionService(transaction._id, reversedBy, reversalReason, session);
+  }
+  return null;
 };
