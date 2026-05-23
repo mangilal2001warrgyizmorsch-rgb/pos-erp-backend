@@ -67,6 +67,7 @@ const productSchema = new mongoose.Schema(
     salesPrice: {
       type: Number,
       default: 0,
+      min: [0, 'Sales price cannot be negative'],
     },
     salesTaxType: {
       type: String,
@@ -76,6 +77,7 @@ const productSchema = new mongoose.Schema(
     purchasePrice: {
       type: Number,
       default: 0,
+      min: [0, 'Purchase price cannot be negative'],
     },
     purchaseTaxType: {
       type: String,
@@ -85,10 +87,12 @@ const productSchema = new mongoose.Schema(
     taxRate: {
       type: Number,
       default: 0,
+      min: [0, 'Tax rate cannot be negative'],
     },
     openingStockPrice: {
       type: Number,
       default: 0,
+      min: [0, 'Opening stock price cannot be negative'],
     },
     openingStockDate: {
       type: Date,

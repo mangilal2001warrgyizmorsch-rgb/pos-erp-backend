@@ -1,25 +1,70 @@
 import Subcategory from '../models/Subcategory.js';
 import Category from '../models/Category.js';
+import Product from '../models/Product.js';
 
 export const getSubcategories = async (req, res, next) => {
   try {
-    const { search, parentCategoryId } = req.query;
-    const query = { isActive: true };
-    
+    const { search, parentCategoryId, all, page, limit = 15 } = req.query;
+    const query = {};
+    if (all !== 'true') {
+      query.isActive = true;
+    }
     if (search) {
       query.name = { $regex: search, $options: 'i' };
     }
-    if (parentCategoryId) {
+    if (parentCategoryId && parentCategoryId !== 'all') {
       query.parentCategoryId = parentCategoryId;
     }
-    
-    const subcategories = await Subcategory.find(query)
-      .populate('parentCategoryId', 'name customId')
-      .sort('name');
+
+    let subcategories;
+    let total;
+    let pagination = null;
+
+    if (page) {
+      const pageNum = parseInt(page) || 1;
+      const limitNum = parseInt(limit) || 15;
+      total = await Subcategory.countDocuments(query);
+      subcategories = await Subcategory.find(query)
+        .populate('parentCategoryId', 'name customId')
+        .sort('name')
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum);
       
+      pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      };
+    } else {
+      subcategories = await Subcategory.find(query)
+        .populate('parentCategoryId', 'name customId')
+        .sort('name');
+    }
+
+    // Aggregate product counts
+    const productCounts = await Product.aggregate([
+      { $match: { isActive: true } },
+      { $group: { _id: '$subcategoryId', count: { $sum: 1 } } }
+    ]);
+
+    const countMap = {};
+    productCounts.forEach(pc => {
+      if (pc._id) {
+        countMap[pc._id.toString()] = pc.count;
+      }
+    });
+
+    const data = subcategories.map(subcat => {
+      const doc = subcat.toObject();
+      doc.productCount = countMap[subcat._id.toString()] || 0;
+      return doc;
+    });
+
     res.status(200).json({
       success: true,
-      data: subcategories,
+      data,
+      ...(pagination && { pagination })
     });
   } catch (error) {
     next(error);

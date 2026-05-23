@@ -4,16 +4,32 @@ import Supplier from '../models/Supplier.js';
 // @route   GET /api/suppliers
 export const getSuppliers = async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, search } = req.query;
+    const { page = 1, limit = 20, search, hasBalance } = req.query;
 
     const query = { isActive: true };
+    const filterConditions = [];
 
     if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-        { gstNumber: { $regex: search, $options: 'i' } },
-      ];
+      filterConditions.push({
+        $or: [
+          { name: { $regex: search, $options: 'i' } },
+          { phone: { $regex: search, $options: 'i' } },
+          { gstNumber: { $regex: search, $options: 'i' } },
+        ]
+      });
+    }
+
+    if (hasBalance === 'true') {
+      filterConditions.push({
+        $or: [
+          { outstandingBalance: { $gt: 0 } },
+          { $and: [ { openingBalanceType: 'Payable' }, { openingBalance: { $gt: 0 } } ] }
+        ]
+      });
+    }
+
+    if (filterConditions.length > 0) {
+      query.$and = filterConditions;
     }
 
     const total = await Supplier.countDocuments(query);

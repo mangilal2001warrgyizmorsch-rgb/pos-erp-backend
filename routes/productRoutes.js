@@ -9,12 +9,16 @@ import {
   getProductStats,
   getProductByBarcode,
   getProductPricing,
+  bulkImportProducts,
+  getGlobalLibrary,
 } from '../controllers/productController.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { productValidator } from '../validators/index.js';
 
 router.use(protect);
 
+router.post('/bulk-import', authorize('admin'), bulkImportProducts);
+router.get('/global-library', getGlobalLibrary);
 router.get('/stats/overview', getProductStats);
 router.get('/barcode/:barcode', getProductByBarcode);
 router.get('/:id/pricing', getProductPricing);

@@ -101,6 +101,15 @@ export const getMe = async (req, res, next) => {
 export const updateProfile = async (req, res, next) => {
   try {
     const { name, phone } = req.body;
+    
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'Name is required' });
+    }
+    
+    if (phone && !/^(?:\+91|0)?[6-9]\d{9}$/.test(phone.trim())) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid Indian mobile number' });
+    }
+
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { name, phone },
@@ -181,6 +190,31 @@ export const resetPassword = async (req, res, next) => {
       message: 'Password reset successful',
       token,
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Change password
+// @route   PUT /api/auth/change-password
+export const changePassword = async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Please provide current and new passwords' });
+    }
+
+    const user = await User.findById(req.user._id).select('+password');
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(400).json({ success: false, message: 'Incorrect current password' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.status(200).json({ success: true, message: 'Password updated successfully' });
   } catch (error) {
     next(error);
   }

@@ -22,9 +22,11 @@ const shiftSchema = new mongoose.Schema(
       type: Number,
       required: true,
       default: 0,
+      min: [0, 'Opening cash cannot be negative'],
     },
     closingCash: {
       type: Number,
+      min: [0, 'Closing cash cannot be negative'],
     },
     expectedCash: {
       type: Number, // Calculated: openingCash + totalSalesCash + cashIn - cashOut

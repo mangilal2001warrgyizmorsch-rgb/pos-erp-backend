@@ -7,6 +7,13 @@ export const openShift = async (req, res, next) => {
   try {
     const { openingCash, counter, notes } = req.body;
 
+    if (openingCash !== undefined && Number(openingCash) < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Opening cash cannot be negative',
+      });
+    }
+
     // Check if there is already an open shift for this user
     const existingShift = await Shift.findOne({
       cashier: req.user._id,
@@ -91,6 +98,13 @@ export const getCurrentShift = async (req, res, next) => {
 export const closeShift = async (req, res, next) => {
   try {
     const { closingCash, notes } = req.body;
+
+    if (closingCash !== undefined && Number(closingCash) < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Closing cash cannot be negative',
+      });
+    }
 
     const shift = await Shift.findOne({
       cashier: req.user._id,

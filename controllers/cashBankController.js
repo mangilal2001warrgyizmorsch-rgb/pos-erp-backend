@@ -148,8 +148,27 @@ export const createBankTransfer = async (req, res) => {
     const transferId = new mongoose.Types.ObjectId();
 
     // 1. Resolve source and destination accounts
-    let fromAccount = await BankAccount.findById(fromAccountId).session(session);
-    let toAccount = await BankAccount.findById(toAccountId).session(session);
+    let actualFromAccountId = fromAccountId;
+    let actualToAccountId = toAccountId;
+
+    if (fromAccountId === 'cash') {
+      const defaultCash = await BankAccount.findOne({ accountType: 'cash' }).session(session);
+      if (!defaultCash) {
+        throw new Error('Default Cash account not found');
+      }
+      actualFromAccountId = defaultCash._id;
+    }
+
+    if (toAccountId === 'cash') {
+      const defaultCash = await BankAccount.findOne({ accountType: 'cash' }).session(session);
+      if (!defaultCash) {
+        throw new Error('Default Cash account not found');
+      }
+      actualToAccountId = defaultCash._id;
+    }
+
+    let fromAccount = await BankAccount.findById(actualFromAccountId).session(session);
+    let toAccount = await BankAccount.findById(actualToAccountId).session(session);
 
     if (!fromAccount || !toAccount) {
       throw new Error('Source or Destination account not found');
@@ -163,13 +182,13 @@ export const createBankTransfer = async (req, res) => {
       amount,
       paymentMode: fromAccount.accountType === 'cash' ? 'Cash' : 'Bank',
       accountType: fromAccount.accountType,
-      accountId: fromAccountId,
+      accountId: actualFromAccountId,
       description: notes || `Transfer to ${toAccount.accountName}`,
       referenceModule: 'bank_transfer',
       referenceId: transferId,
       referenceNo: 'TRF-' + Math.floor(Math.random() * 100000),
       createdBy: req.user._id,
-      metadata: { transferId, toAccountId }
+      metadata: { transferId, toAccountId: actualToAccountId }
     }, session);
 
     // 3. Inflow to destination account
@@ -180,13 +199,13 @@ export const createBankTransfer = async (req, res) => {
       amount,
       paymentMode: toAccount.accountType === 'cash' ? 'Cash' : 'Bank',
       accountType: toAccount.accountType,
-      accountId: toAccountId,
+      accountId: actualToAccountId,
       description: notes || `Transfer from ${fromAccount.accountName}`,
       referenceModule: 'bank_transfer',
       referenceId: transferId,
       referenceNo: sourceTx.referenceNo,
       createdBy: req.user._id,
-      metadata: { transferId, fromAccountId }
+      metadata: { transferId, fromAccountId: actualFromAccountId }
     }, session);
 
     if (session) {

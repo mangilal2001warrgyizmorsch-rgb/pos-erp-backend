@@ -40,6 +40,7 @@ import paymentOutRoutes from './routes/paymentOutRoutes.js';
 import cashBankRoutes from './routes/cashBankRoutes.js';
 import partyLedgerRoutes from './routes/partyLedgerRoutes.js';
 import inventoryRoutes from './routes/inventoryRoutes.js';
+import activityLogRoutes from './routes/activityLogRoutes.js';
 import { reconcileLegacyLedgers } from './utils/reconcileLedgers.js';
 
 
@@ -123,6 +124,7 @@ app.use('/api/payment-out', paymentOutRoutes);
 app.use('/api/cash-bank', cashBankRoutes);
 app.use('/api/ledger', partyLedgerRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api/activity-logs', activityLogRoutes);
 
 
 // Health check

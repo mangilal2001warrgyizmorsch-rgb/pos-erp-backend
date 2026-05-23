@@ -2,6 +2,8 @@ import Product from '../models/Product.js';
 import StockBatch from '../models/StockBatch.js';
 import SalesPrice from '../models/SalesPrice.js';
 import StockMovement from '../models/StockMovement.js';
+import Category from '../models/Category.js';
+import { GLOBAL_LIBRARY } from '../constants/globalLibrary.js';
 
 // @desc    Get all products
 // @route   GET /api/products
@@ -356,6 +358,121 @@ export const getProductStats = async (req, res, next) => {
         inventoryValue: totalValue[0]?.totalValue || 0,
         inventoryCost: totalValue[0]?.totalCost || 0,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Bulk Import Products
+// @route   POST /api/products/bulk-import
+export const bulkImportProducts = async (req, res, next) => {
+  try {
+    const { products } = req.body;
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ success: false, message: 'Invalid products data' });
+    }
+
+    const imported = [];
+    const errors = [];
+
+    // Let's get a default category if not provided
+    let defaultCategory = await Category.findOne({ isActive: true });
+    if (!defaultCategory) {
+      defaultCategory = await Category.create({ name: 'General', isActive: true });
+    }
+
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+      try {
+        // Validate required fields
+        if (!p.name) {
+          errors.push(`Row ${i + 1}: Name is required`);
+          continue;
+        }
+
+        // Generate SKU if not provided
+        let sku = p.sku;
+        if (!sku) {
+          sku = `SKU-${Math.floor(100000 + Math.random() * 900000)}`;
+        }
+
+        // Check if product with this SKU already exists
+        const existing = await Product.findOne({ sku: sku.toUpperCase() });
+        if (existing) {
+          errors.push(`Row ${i + 1}: Product with SKU ${sku} already exists`);
+          continue;
+        }
+
+        // Handle category lookup or default
+        let categoryId = defaultCategory._id;
+        if (p.category) {
+          const cat = await Category.findOne({ name: { $regex: new RegExp(`^${p.category.trim()}$`, 'i') }, isActive: true });
+          if (cat) {
+            categoryId = cat._id;
+          } else {
+            // Create category if it doesn't exist
+            const newCat = await Category.create({ name: p.category.trim(), isActive: true });
+            categoryId = newCat._id;
+          }
+        }
+
+        // Create product
+        const newProduct = await Product.create({
+          name: p.name.trim(),
+          sku: sku.toUpperCase(),
+          barcode: p.barcode ? p.barcode.trim() : '',
+          description: p.description ? p.description.trim() : '',
+          category: categoryId,
+          stock: p.stock !== undefined ? Math.max(0, Number(p.stock)) : 0,
+          salesPrice: p.salesPrice !== undefined ? Math.max(0, Number(p.salesPrice)) : 0,
+          purchasePrice: p.purchasePrice !== undefined ? Math.max(0, Number(p.purchasePrice)) : 0,
+          taxRate: p.taxRate !== undefined ? Math.max(0, Number(p.taxRate)) : 0,
+          unit: p.unit || 'piece',
+          isActive: true
+        });
+
+        imported.push(newProduct);
+      } catch (err) {
+        errors.push(`Row ${i + 1}: ${err.message}`);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Import completed: ${imported.length} imported, ${errors.length} failed.`,
+      data: imported,
+      errors
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get Global Product Library
+// @route   GET /api/products/global-library
+export const getGlobalLibrary = async (req, res, next) => {
+  try {
+    const { search, barcode } = req.query;
+    if (barcode) {
+      const found = GLOBAL_LIBRARY.find(item => item.barcode === barcode);
+      return res.status(200).json({
+        success: true,
+        data: found ? [found] : []
+      });
+    }
+    
+    let results = GLOBAL_LIBRARY;
+    if (search) {
+      results = GLOBAL_LIBRARY.filter(item => 
+        item.name.toLowerCase().includes(search.toLowerCase()) || 
+        item.barcode.includes(search)
+      );
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: results
     });
   } catch (error) {
     next(error);

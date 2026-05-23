@@ -16,6 +16,7 @@ const transporterSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Phone number is required'],
       trim: true,
+      match: [/^(?:\+91|0)?[6-9]\d{9}$/, 'Please provide a valid Indian mobile number'],
     },
     address: {
       type: String,

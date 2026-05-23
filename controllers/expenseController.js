@@ -5,6 +5,17 @@ import { createCashBankTransaction, reverseReferenceTransaction } from '../servi
 // @route   POST /api/expenses
 export const createExpense = async (req, res, next) => {
   try {
+    const { amount, paymentMethod, cashBankAccountId, title } = req.body;
+    if (!title || amount === undefined) {
+      return res.status(400).json({ success: false, message: 'Title and amount are required' });
+    }
+    if (Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    }
+    if (paymentMethod && paymentMethod !== 'cash' && !cashBankAccountId) {
+      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash expense' });
+    }
+
     const expenseData = {
       ...req.body,
       categoryName: req.body.category, // since it's a string
@@ -110,6 +121,21 @@ export const updateExpense = async (req, res, next) => {
         success: false,
         message: 'Expense not found',
       });
+    }
+
+    const title = req.body.title !== undefined ? req.body.title : oldExpense.title;
+    const amount = req.body.amount !== undefined ? req.body.amount : oldExpense.amount;
+    const paymentMethod = req.body.paymentMethod !== undefined ? req.body.paymentMethod : oldExpense.paymentMethod;
+    const cashBankAccountId = req.body.cashBankAccountId !== undefined ? req.body.cashBankAccountId : oldExpense.cashBankAccountId;
+
+    if (!title || amount === undefined) {
+      return res.status(400).json({ success: false, message: 'Title and amount are required' });
+    }
+    if (Number(amount) <= 0) {
+      return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
+    }
+    if (paymentMethod && paymentMethod !== 'cash' && !cashBankAccountId) {
+      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash expense' });
     }
 
     // Reverse old cash/bank transaction

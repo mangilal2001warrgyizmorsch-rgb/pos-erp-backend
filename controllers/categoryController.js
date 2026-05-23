@@ -1,18 +1,65 @@
 import Category from '../models/Category.js';
+import Product from '../models/Product.js';
 
 // @desc    Get all categories
 // @route   GET /api/categories
 export const getCategories = async (req, res, next) => {
   try {
-    const { search } = req.query;
-    const query = { isActive: true };
+    const { search, all, page, limit = 15 } = req.query;
+    const query = {};
+    if (all !== 'true') {
+      query.isActive = true;
+    }
     if (search) {
       query.name = { $regex: search, $options: 'i' };
     }
-    const categories = await Category.find(query).sort('name');
+
+    let categories;
+    let total;
+    let pagination = null;
+
+    if (page) {
+      const pageNum = parseInt(page) || 1;
+      const limitNum = parseInt(limit) || 15;
+      total = await Category.countDocuments(query);
+      categories = await Category.find(query)
+        .sort('name')
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum);
+      
+      pagination = {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      };
+    } else {
+      categories = await Category.find(query).sort('name');
+    }
+
+    // Aggregate product counts
+    const productCounts = await Product.aggregate([
+      { $match: { isActive: true } },
+      { $group: { _id: '$category', count: { $sum: 1 } } }
+    ]);
+
+    const countMap = {};
+    productCounts.forEach(pc => {
+      if (pc._id) {
+        countMap[pc._id.toString()] = pc.count;
+      }
+    });
+
+    const data = categories.map(cat => {
+      const doc = cat.toObject();
+      doc.productCount = countMap[cat._id.toString()] || 0;
+      return doc;
+    });
+
     res.status(200).json({
       success: true,
-      data: categories,
+      data,
+      ...(pagination && { pagination })
     });
   } catch (error) {
     next(error);
