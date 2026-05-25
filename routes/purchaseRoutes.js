@@ -5,6 +5,8 @@ import {
   getPurchase,
   createPurchase,
   getUnpaidPurchases,
+  deletePurchase,
+  updatePurchase,
 } from '../controllers/purchaseController.js';
 import {
   getUnreturnedPurchasesForSupplier,
@@ -19,6 +21,9 @@ router.get('/unpaid/:supplierId', getUnpaidPurchases);
 router.get('/supplier/:supplierId/unreturned', getUnreturnedPurchasesForSupplier);
 router.get('/:id/returnable-items', getReturnableItemsFromPurchase);
 router.route('/').get(getPurchases).post(purchaseValidator, createPurchase);
-router.route('/:id').get(getPurchase);
+router.route('/:id')
+  .get(getPurchase)
+  .put(updatePurchase)
+  .delete(deletePurchase);
 
 export default router;

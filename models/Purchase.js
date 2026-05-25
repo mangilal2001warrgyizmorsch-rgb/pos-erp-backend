@@ -74,6 +74,14 @@ const purchaseSchema = new mongoose.Schema(
       type: String, // Supplier's invoice number
       trim: true,
     },
+    purchaseDate: {
+      type: Date,
+      default: Date.now,
+    },
+    stateOfSupply: {
+      type: String,
+      trim: true,
+    },
     items: [purchaseItemSchema],
     subtotal: {
       type: Number,
@@ -97,6 +105,14 @@ const purchaseSchema = new mongoose.Schema(
       default: 0,
     },
     discountAmount: {
+      type: Number,
+      default: 0,
+    },
+    shippingCharges: {
+      type: Number,
+      default: 0,
+    },
+    roundOff: {
       type: Number,
       default: 0,
     },

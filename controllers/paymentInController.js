@@ -229,3 +229,186 @@ export const deletePaymentIn = async (req, res) => {
   }
 };
 
+// @desc    Update payment in
+// @route   PUT /api/payment-in/:id
+// @access  Private
+export const updatePaymentIn = async (req, res) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
+  try {
+    const payment = await PaymentIn.findById(req.params.id).session(session);
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment not found' });
+    }
+
+    const {
+      partyId,
+      amountReceived,
+      paymentMode,
+      cashBankAccountId,
+      linkedInvoiceId,
+      referenceNo,
+      description,
+      attachments,
+      date
+    } = req.body;
+
+    // 1. Revert Old Effects
+    // Revert account balance
+    let oldAccount;
+    if (payment.cashBankAccountId) {
+      oldAccount = await BankAccount.findById(payment.cashBankAccountId).session(session);
+    } else {
+      oldAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
+    }
+    if (oldAccount) {
+      oldAccount.currentBalance -= payment.amountReceived;
+      await oldAccount.save({ session, validateBeforeSave: false });
+    }
+
+    // Revert Customer wallet balance
+    const oldCustomer = await Customer.findById(payment.partyId).session(session);
+    if (oldCustomer) {
+      oldCustomer.walletBalance -= payment.amountReceived;
+      await oldCustomer.save({ session });
+    }
+
+    // Revert linked invoice
+    if (payment.linkedInvoiceId) {
+      const oldSale = await Sale.findById(payment.linkedInvoiceId).session(session);
+      if (oldSale) {
+        oldSale.amountPaid -= payment.amountReceived;
+        if (oldSale.amountPaid <= 0) {
+          oldSale.paymentStatus = 'pending';
+        } else if (oldSale.amountPaid < oldSale.totalAmount) {
+          oldSale.paymentStatus = 'partial';
+        } else {
+          oldSale.paymentStatus = 'paid';
+        }
+        await oldSale.save({ session });
+      }
+    }
+
+    // Delete previous Ledger entry and CashBank transaction so we can recreate them
+    await CashBankTransaction.deleteOne({ referenceId: payment._id }).session(session);
+    await PartyLedger.deleteOne({ referenceId: payment._id }).session(session);
+
+    // 2. Apply New Effects
+    const newPartyId = partyId || payment.partyId;
+    const newCustomer = await Customer.findById(newPartyId).session(session);
+    if (!newCustomer) throw new Error('Customer not found');
+
+    payment.partyId = newPartyId;
+    payment.partyName = newCustomer.name;
+    payment.amountReceived = amountReceived;
+    payment.paymentMode = paymentMode;
+    payment.cashBankAccountId = cashBankAccountId;
+    payment.linkedInvoiceId = linkedInvoiceId;
+    payment.referenceNo = referenceNo;
+    payment.description = description;
+    payment.attachments = attachments;
+    payment.date = date || Date.now();
+
+    await payment.save({ session });
+
+    // Apply new account balance
+    let newAccount;
+    if (cashBankAccountId) {
+      newAccount = await BankAccount.findById(cashBankAccountId).session(session);
+    } else {
+      newAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
+    }
+    if (newAccount) {
+      newAccount.currentBalance += amountReceived;
+      await newAccount.save({ session, validateBeforeSave: false });
+    }
+
+    // Apply new Customer wallet balance
+    newCustomer.walletBalance += amountReceived;
+    await newCustomer.save({ session });
+
+    // Apply new CashBank transaction
+    await createCashBankTransaction({
+      date: date || new Date(),
+      type: 'payment_in',
+      direction: 'in',
+      amount: amountReceived,
+      paymentMode,
+      accountType: cashBankAccountId ? 'bank' : 'cash',
+      accountId: cashBankAccountId || undefined,
+      partyId: newPartyId,
+      partyType: 'Customer',
+      referenceModule: 'payment_in',
+      referenceId: payment._id,
+      referenceNo: payment.receiptNo,
+      description: description || `Payment In Updated: ${payment.receiptNo}`,
+      createdBy: req.user._id
+    }, session);
+
+    // Apply new PartyLedger entry
+    await partyLedgerService.createEntry({
+      partyId: newPartyId,
+      partyType: 'Customer',
+      type: 'payment_in',
+      creditAmount: amountReceived,
+      referenceId: payment._id,
+      receiptNo: payment.receiptNo,
+      notes: description,
+      date: date || Date.now()
+    }, session);
+
+    // Update new Linked Invoice
+    if (linkedInvoiceId) {
+      const newSale = await Sale.findById(linkedInvoiceId).session(session);
+      if (newSale) {
+        const newAmountPaid = (newSale.amountPaid || 0) + Number(amountReceived);
+        let paymentStatus = 'partial';
+        if (newAmountPaid >= newSale.totalAmount) {
+          paymentStatus = 'paid';
+        }
+        await Sale.findByIdAndUpdate(
+          linkedInvoiceId,
+          { 
+            $set: { 
+              amountPaid: newAmountPaid,
+              paymentStatus: paymentStatus
+            } 
+          },
+          { session }
+        );
+      }
+    }
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Broadcast Socket updates
+    try {
+      emitSocketEvent('paymentIn:updated', {
+        _id: payment._id,
+        receiptNo: payment.receiptNo,
+        amountReceived,
+        customerName: newCustomer.name
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit paymentIn socket event:', e);
+    }
+
+    res.status(200).json({ success: true, data: payment });
+  } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
+    res.status(500).json({ success: false, message: error.message });
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+};
+

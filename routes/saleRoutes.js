@@ -8,6 +8,8 @@ import {
   getSalesReport,
   cancelSale,
   getUnpaidSales,
+  updateSale,
+  deleteSale,
 } from '../controllers/saleController.js';
 import {
   getUnreturnedSalesForCustomer,
@@ -24,7 +26,10 @@ router.get('/unpaid/:customerId', getUnpaidSales);
 router.get('/customer/:customerId/unreturned', getUnreturnedSalesForCustomer);
 router.get('/:id/returnable-items', getReturnableItemsFromSale);
 router.route('/').get(getSales).post(saleValidator, createSale);
-router.route('/:id').get(getSale);
+router.route('/:id')
+  .get(getSale)
+  .put(updateSale)
+  .delete(deleteSale);
 router.route('/:id/cancel').put(cancelSale);
 
 export default router;

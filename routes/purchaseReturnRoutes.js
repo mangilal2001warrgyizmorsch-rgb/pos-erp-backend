@@ -5,6 +5,7 @@ import {
   getPurchaseReturns,
   getPurchaseReturn,
   updatePurchaseReturn,
+  deletePurchaseReturn,
   cancelPurchaseReturn,
   getUnreturnedPurchasesForSupplier,
   getReturnableItemsFromPurchase,
@@ -21,7 +22,7 @@ router.get('/bill/:id/returnable-items', getReturnableItemsFromPurchase);
 
 // Main CRUD routes
 router.route('/').get(getPurchaseReturns).post(createPurchaseReturn);
-router.route('/:id').get(getPurchaseReturn).put(updatePurchaseReturn);
+router.route('/:id').get(getPurchaseReturn).put(updatePurchaseReturn).delete(deletePurchaseReturn);
 router.route('/:id/cancel').post(cancelPurchaseReturn);
 
 export default router;

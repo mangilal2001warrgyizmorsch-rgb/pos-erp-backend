@@ -5,6 +5,7 @@ import {
   getSaleReturns,
   getSaleReturn,
   updateSaleReturn,
+  deleteSaleReturn,
   cancelSaleReturn,
   getUnreturnedSalesForCustomer,
   getReturnableItemsFromSale,
@@ -21,7 +22,7 @@ router.get('/invoice/:id/returnable-items', getReturnableItemsFromSale);
 
 // Main CRUD routes
 router.route('/').get(getSaleReturns).post(createSaleReturn);
-router.route('/:id').get(getSaleReturn).put(updateSaleReturn);
+router.route('/:id').get(getSaleReturn).put(updateSaleReturn).delete(deleteSaleReturn);
 router.route('/:id/cancel').post(cancelSaleReturn);
 
 export default router;

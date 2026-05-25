@@ -1,5 +1,5 @@
 import express from 'express';
-import { createPaymentOut, getPaymentOuts, getPaymentOutById, deletePaymentOut } from '../controllers/paymentOutController.js';
+import { createPaymentOut, getPaymentOuts, getPaymentOutById, deletePaymentOut, updatePaymentOut } from '../controllers/paymentOutController.js';
 import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -11,6 +11,7 @@ router.route('/')
 
 router.route('/:id')
   .get(getPaymentOutById)
+  .put(updatePaymentOut)
   .delete(deletePaymentOut);
 
 export default router;

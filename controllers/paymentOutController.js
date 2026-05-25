@@ -229,3 +229,186 @@ export const deletePaymentOut = async (req, res) => {
   }
 };
 
+// @desc    Update payment out
+// @route   PUT /api/payment-out/:id
+// @access  Private
+export const updatePaymentOut = async (req, res) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
+  try {
+    const payment = await PaymentOut.findById(req.params.id).session(session);
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment not found' });
+    }
+
+    const {
+      partyId,
+      amountPaid,
+      paymentMode,
+      cashBankAccountId,
+      linkedPurchaseId,
+      referenceNo,
+      description,
+      attachments,
+      date
+    } = req.body;
+
+    // 1. Revert Old Effects
+    // Revert account balance
+    let oldAccount;
+    if (payment.cashBankAccountId) {
+      oldAccount = await BankAccount.findById(payment.cashBankAccountId).session(session);
+    } else {
+      oldAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
+    }
+    if (oldAccount) {
+      oldAccount.currentBalance += payment.amountPaid;
+      await oldAccount.save({ session, validateBeforeSave: false });
+    }
+
+    // Revert Supplier outstanding balance
+    const oldSupplier = await Supplier.findById(payment.partyId).session(session);
+    if (oldSupplier) {
+      oldSupplier.outstandingBalance += payment.amountPaid;
+      await oldSupplier.save({ session });
+    }
+
+    // Revert linked purchase
+    if (payment.linkedPurchaseId) {
+      const oldPurchase = await Purchase.findById(payment.linkedPurchaseId).session(session);
+      if (oldPurchase) {
+        oldPurchase.amountPaid -= payment.amountPaid;
+        if (oldPurchase.amountPaid <= 0) {
+          oldPurchase.paymentStatus = 'pending';
+        } else if (oldPurchase.amountPaid < oldPurchase.totalAmount) {
+          oldPurchase.paymentStatus = 'partial';
+        } else {
+          oldPurchase.paymentStatus = 'paid';
+        }
+        await oldPurchase.save({ session });
+      }
+    }
+
+    // Delete previous Ledger entry and CashBank transaction so we can recreate them
+    await CashBankTransaction.deleteOne({ referenceId: payment._id }).session(session);
+    await PartyLedger.deleteOne({ referenceId: payment._id }).session(session);
+
+    // 2. Apply New Effects
+    const newPartyId = partyId || payment.partyId;
+    const newSupplier = await Supplier.findById(newPartyId).session(session);
+    if (!newSupplier) throw new Error('Supplier not found');
+
+    payment.partyId = newPartyId;
+    payment.partyName = newSupplier.name;
+    payment.amountPaid = amountPaid;
+    payment.paymentMode = paymentMode;
+    payment.cashBankAccountId = cashBankAccountId;
+    payment.linkedPurchaseId = linkedPurchaseId;
+    payment.referenceNo = referenceNo;
+    payment.description = description;
+    payment.attachments = attachments;
+    payment.date = date || Date.now();
+
+    await payment.save({ session });
+
+    // Apply new account balance
+    let newAccount;
+    if (cashBankAccountId) {
+      newAccount = await BankAccount.findById(cashBankAccountId).session(session);
+    } else {
+      newAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
+    }
+    if (newAccount) {
+      newAccount.currentBalance -= amountPaid;
+      await newAccount.save({ session, validateBeforeSave: false });
+    }
+
+    // Apply new Supplier outstanding balance
+    newSupplier.outstandingBalance -= amountPaid;
+    await newSupplier.save({ session });
+
+    // Apply new CashBank transaction
+    await createCashBankTransaction({
+      date: date || new Date(),
+      type: 'payment_out',
+      direction: 'out',
+      amount: amountPaid,
+      paymentMode,
+      accountType: cashBankAccountId ? 'bank' : 'cash',
+      accountId: cashBankAccountId || undefined,
+      partyId: newPartyId,
+      partyType: 'Supplier',
+      referenceModule: 'payment_out',
+      referenceId: payment._id,
+      referenceNo: payment.receiptNo,
+      description: description || `Payment Out Updated: ${payment.receiptNo}`,
+      createdBy: req.user._id
+    }, session);
+
+    // Apply new PartyLedger entry
+    await partyLedgerService.createEntry({
+      partyId: newPartyId,
+      partyType: 'Supplier',
+      type: 'payment_out',
+      debitAmount: amountPaid,
+      referenceId: payment._id,
+      receiptNo: payment.receiptNo,
+      notes: description,
+      date: date || Date.now()
+    }, session);
+
+    // Update new Linked Purchase
+    if (linkedPurchaseId) {
+      const newPurchase = await Purchase.findById(linkedPurchaseId).session(session);
+      if (newPurchase) {
+        const newAmountPaid = (newPurchase.amountPaid || 0) + Number(amountPaid);
+        let paymentStatus = 'partial';
+        if (newAmountPaid >= newPurchase.totalAmount) {
+          paymentStatus = 'paid';
+        }
+        await Purchase.findByIdAndUpdate(
+          linkedPurchaseId,
+          { 
+            $set: { 
+              amountPaid: newAmountPaid,
+              paymentStatus: paymentStatus
+            } 
+          },
+          { session }
+        );
+      }
+    }
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Broadcast Socket updates
+    try {
+      emitSocketEvent('paymentOut:updated', {
+        _id: payment._id,
+        receiptNo: payment.receiptNo,
+        amountPaid,
+        supplierName: newSupplier.name
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit paymentOut socket event:', e);
+    }
+
+    res.status(200).json({ success: true, data: payment });
+  } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
+    res.status(500).json({ success: false, message: error.message });
+  } finally {
+    if (session) {
+      session.endSession();
+    }
+  }
+};
+

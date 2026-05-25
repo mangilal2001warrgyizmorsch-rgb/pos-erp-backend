@@ -528,6 +528,112 @@ export const cancelPurchaseReturn = async (req, res, next) => {
   }
 };
 
+// @desc    Delete Purchase Return / Debit Note
+// @route   DELETE /api/purchases-returns/:id
+export const deletePurchaseReturn = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
+  try {
+    const purchaseReturn = await PurchaseReturn.findById(req.params.id).session(session);
+
+    if (!purchaseReturn) {
+      return res.status(404).json({ success: false, message: 'Purchase return not found' });
+    }
+
+    // 1. Reverse stock movements
+    for (const item of purchaseReturn.items) {
+      const product = await Product.findById(item.product).session(session);
+      if (product) {
+        // Reduce the stock back to what it was before the return
+        product.stock -= item.returnQty;
+        await product.save({ session });
+        
+        // Reverse the batch quantities
+        let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        if (batch) {
+          batch.availableQty += item.returnQty;
+          await batch.save({ session });
+        }
+      }
+    }
+
+    // 2. Reverse original purchase bill return status
+    const originalPurchase = await Purchase.findById(purchaseReturn.purchase).session(session);
+    if (originalPurchase) {
+      for (const item of purchaseReturn.items) {
+        const originalItem = originalPurchase.items.find(
+          (i) => i.product.toString() === item.product.toString()
+        );
+        if (originalItem) {
+          originalItem.returnedQty = (originalItem.returnedQty || 0) - item.returnQty;
+        }
+      }
+      originalPurchase.returnStatus = originalPurchase.items.some(
+        (i) => (i.returnedQty || 0) > 0
+      ) ? 'partially_returned' : 'not_returned';
+      await originalPurchase.save({ session, validateBeforeSave: false });
+    }
+
+    // 3. Reverse cash/bank transactions and update balances
+    const cashTransactions = await CashBankTransaction.find({ referenceId: purchaseReturn._id, status: 'completed' }).session(session);
+    for (const tx of cashTransactions) {
+      if (tx.accountId) {
+        const bankAccount = await BankAccount.findById(tx.accountId).session(session);
+        if (bankAccount) {
+          if (tx.direction === 'in') {
+            bankAccount.currentBalance -= tx.amount;
+          } else {
+            bankAccount.currentBalance += tx.amount;
+          }
+          await bankAccount.save({ session, validateBeforeSave: false });
+        }
+      }
+    }
+    await CashBankTransaction.deleteMany({ referenceId: purchaseReturn._id }).session(session);
+
+    // 4. Reverse supplier debit balance and delete party ledger entry
+    const supplier = await Supplier.findById(purchaseReturn.supplier).session(session);
+    if (supplier) {
+      if (purchaseReturn.debitBalance > 0) {
+        supplier.outstandingBalance = (supplier.outstandingBalance || 0) - purchaseReturn.debitBalance;
+      }
+      if (purchaseReturn.refundReceivedAmount > 0) {
+        supplier.totalPurchases = (supplier.totalPurchases || 0) - 1;
+      }
+      await supplier.save({ session, validateBeforeSave: false });
+    }
+    await PartyLedger.deleteMany({ referenceId: purchaseReturn._id }).session(session);
+
+    // 5. Delete the purchase return document
+    await PurchaseReturn.findByIdAndDelete(purchaseReturn._id).session(session);
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Broadcast WebSocket update
+    try {
+      emitSocketEvent('purchaseReturn:deleted', { _id: purchaseReturn._id });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit event:', e);
+    }
+
+    res.status(200).json({ 
+      success: true, 
+      message: 'Purchase return deleted and all related transactions reversed successfully' 
+    });
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    next(error);
+  } finally {
+    if (session) session.endSession();
+  }
+};
+
 // @desc    Get unreturned purchases for a supplier
 // @route   GET /api/purchases/supplier/:supplierId/unreturned
 export const getUnreturnedPurchasesForSupplier = async (req, res, next) => {

@@ -9,6 +9,10 @@ import { createCashBankTransaction, reverseReferenceTransaction } from '../servi
 import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
+import { recordStockMovement } from '../utils/stockMovement.js';
+import BankAccount from '../models/BankAccount.js';
+import CashBankTransaction from '../models/CashBankTransaction.js';
+import PartyLedger from '../models/PartyLedger.js';
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -627,5 +631,350 @@ export const getUnpaidSales = async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+};
+
+// @desc    Delete sale and restore stock
+// @route   DELETE /api/sales/:id
+export const deleteSale = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
+  try {
+    const sale = await Sale.findById(req.params.id).session(session);
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    // 1. Restore stock and log movements
+    for (const item of sale.items) {
+      const product = await Product.findByIdAndUpdate(
+        item.product,
+        { $inc: { stock: item.quantity } },
+        { new: true, session }
+      );
+
+      if (product) {
+        await recordStockMovement({
+          productId: product._id,
+          productName: product.name,
+          type: 'cancellation',
+          quantity: item.quantity,
+          previousStock: product.stock - item.quantity,
+          newStock: product.stock,
+          reference: sale.invoiceNumber,
+          referenceId: sale._id,
+          notes: 'Sale deleted',
+          createdBy: req.user._id,
+        }, session);
+
+        // Restore batch quantities
+        let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        if (batch) {
+          batch.availableQty += item.quantity;
+          await batch.save({ session });
+        }
+      }
+    }
+
+    // 2. Revert customer balance and delete PartyLedger entry
+    if (sale.customer) {
+      await Customer.findByIdAndUpdate(
+        sale.customer,
+        {
+          $inc: {
+            totalPurchases: -1,
+            totalSpent: -sale.totalAmount,
+            walletBalance: -(sale.amountPaid - sale.totalAmount)
+          }
+        },
+        { session }
+      );
+      await PartyLedger.deleteOne({ referenceId: sale._id }).session(session);
+    }
+
+    // 3. Revert cash/bank transaction
+    const oldTransactions = await CashBankTransaction.find({ referenceId: sale._id, status: 'completed' }).session(session);
+    for (const tx of oldTransactions) {
+      if (tx.accountId) {
+        const acc = await BankAccount.findById(tx.accountId).session(session);
+        if (acc) {
+          if (tx.direction === 'in') {
+            acc.currentBalance -= tx.amount;
+          } else {
+            acc.currentBalance += tx.amount;
+          }
+          await acc.save({ session, validateBeforeSave: false });
+        }
+      }
+    }
+    await CashBankTransaction.deleteMany({ referenceId: sale._id }).session(session);
+
+    // 4. Delete sale invoice document
+    await Sale.findByIdAndDelete(sale._id).session(session);
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Broadcast WebSocket updates
+    try {
+      emitSocketEvent('sale:deleted', { _id: sale._id });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit sale event:', e);
+    }
+
+    res.status(200).json({ success: true, message: 'Sale deleted and stock restored successfully' });
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    next(error);
+  } finally {
+    if (session) session.endSession();
+  }
+};
+
+// @desc    Update sale and adjust inventory/ledger
+// @route   PUT /api/sales/:id
+export const updateSale = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
+  try {
+    const sale = await Sale.findById(req.params.id).session(session);
+    if (!sale) {
+      return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+
+    const {
+      items,
+      customer,
+      customerName,
+      subtotal,
+      taxRate,
+      taxAmount,
+      totalCgst,
+      totalSgst,
+      totalIgst,
+      discountType,
+      discountValue,
+      discountAmount,
+      totalAmount,
+      paymentMethod,
+      paymentStatus,
+      amountPaid,
+      changeAmount,
+      notes,
+      cashBankAccountId,
+    } = req.body;
+
+    // 1. REVERSAL PHASE (of old sale)
+    for (const item of sale.items) {
+      const product = await Product.findByIdAndUpdate(
+        item.product,
+        { $inc: { stock: item.quantity } },
+        { new: true, session }
+      );
+      if (product) {
+        let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        if (batch) {
+          batch.availableQty += item.quantity;
+          await batch.save({ session });
+        }
+      }
+    }
+
+    if (sale.customer) {
+      await Customer.findByIdAndUpdate(
+        sale.customer,
+        {
+          $inc: {
+            totalPurchases: -1,
+            totalSpent: -sale.totalAmount,
+            walletBalance: -(sale.amountPaid - sale.totalAmount)
+          }
+        },
+        { session }
+      );
+      await PartyLedger.deleteOne({ referenceId: sale._id }).session(session);
+    }
+
+    // Revert old Cash/Bank transactions manually
+    const oldTransactions = await CashBankTransaction.find({ referenceId: sale._id, status: 'completed' }).session(session);
+    for (const tx of oldTransactions) {
+      if (tx.accountId) {
+        const acc = await BankAccount.findById(tx.accountId).session(session);
+        if (acc) {
+          if (tx.direction === 'in') {
+            acc.currentBalance -= tx.amount;
+          } else {
+            acc.currentBalance += tx.amount;
+          }
+          await acc.save({ session, validateBeforeSave: false });
+        }
+      }
+    }
+    await CashBankTransaction.deleteMany({ referenceId: sale._id }).session(session);
+
+    // 2. CREATION/APPLICATION PHASE (of new sale details)
+    const saleItems = [];
+
+    // Deduct stock and validate
+    for (const item of items) {
+      const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
+      if (!product) {
+        throw new Error(`Product not found: ${item.product}`);
+      }
+
+      // Check stock
+      if ((product.stock || 0) < item.quantity) {
+        throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`);
+      }
+
+      const batches = await StockBatch.find({
+        productId: item.product,
+        availableQty: { $gt: 0 }
+      }).sort({ createdAt: 1 }).session(session);
+
+      let remainingToDeduct = item.quantity;
+      let totalPurchaseCost = 0;
+
+      for (const batch of batches) {
+        if (remainingToDeduct <= 0) break;
+        const deductQty = Math.min(batch.availableQty, remainingToDeduct);
+        totalPurchaseCost += deductQty * batch.purchasePrice;
+        remainingToDeduct -= deductQty;
+      }
+
+      const avgPurchasePrice = item.quantity > 0 ? totalPurchaseCost / item.quantity : 0;
+
+      await inventoryService.deductStock({
+        productId: item.product,
+        quantity: item.quantity,
+        reference: sale.invoiceNumber,
+        referenceId: sale._id,
+        notes: `Updated Sale invoice ${sale.invoiceNumber}`,
+        createdBy: req.user._id
+      }, session);
+
+      saleItems.push({
+        product: product._id,
+        name: product.name,
+        sku: product.sku,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        purchasePrice: avgPurchasePrice,
+        profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
+        taxRate: item.taxRate || 0,
+        cgst: item.cgst || 0,
+        sgst: item.sgst || 0,
+        igst: item.igst || 0,
+        total: item.unitPrice * item.quantity,
+      });
+    }
+
+    // Update sale fields in-place
+    sale.items = saleItems;
+    sale.customer = customer || undefined;
+    sale.customerName = customerName || 'Walk-in Customer';
+    sale.subtotal = subtotal;
+    sale.taxRate = taxRate || 0;
+    sale.taxAmount = taxAmount || 0;
+    sale.totalCgst = totalCgst || 0;
+    sale.totalSgst = totalSgst || 0;
+    sale.totalIgst = totalIgst || 0;
+    sale.discountType = discountType || 'fixed';
+    sale.discountValue = discountValue || 0;
+    sale.discountAmount = discountAmount || 0;
+    sale.totalAmount = totalAmount;
+    sale.paymentMethod = paymentMethod;
+    sale.paymentStatus = paymentStatus || 'paid';
+    sale.amountPaid = amountPaid || totalAmount;
+    sale.changeAmount = changeAmount || 0;
+    sale.notes = notes;
+    sale.cashBankAccountId = cashBankAccountId;
+
+    await sale.save({ session });
+
+    // Update customer stats
+    if (customer) {
+      await Customer.findByIdAndUpdate(
+        customer,
+        {
+          $inc: {
+            totalPurchases: 1,
+            totalSpent: totalAmount,
+          },
+        },
+        { session }
+      );
+
+      await partyLedgerService.createEntry({
+        partyId: customer,
+        partyType: 'Customer',
+        type: 'sale',
+        debitAmount: Number(totalAmount),
+        creditAmount: Number(amountPaid || 0),
+        referenceId: sale._id,
+        receiptNo: sale.invoiceNumber,
+        notes: `Sale Invoice Updated ${sale.invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${amountPaid}`,
+        date: new Date()
+      }, session);
+    }
+
+    if (sale.amountPaid > 0) {
+      await createCashBankTransaction({
+        date: sale.createdAt || new Date(),
+        type: 'sale_payment',
+        direction: 'in',
+        amount: sale.amountPaid,
+        paymentMode: sale.paymentMethod || 'Cash',
+        accountType: (sale.paymentMethod === 'Cash' || sale.paymentMethod === 'cash') ? 'cash' : 'bank',
+        accountId: sale.cashBankAccountId || undefined,
+        partyId: customer || undefined,
+        partyType: 'Customer',
+        referenceModule: 'sale_invoice',
+        referenceId: sale._id,
+        referenceNo: sale.invoiceNumber,
+        description: `Payment received for updated Invoice ${sale.invoiceNumber}`,
+        createdBy: req.user._id
+      }, session);
+    }
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    // Emit live WebSocket sync
+    try {
+      emitSocketEvent('sale:updated', {
+        _id: sale._id,
+        invoiceNo: sale.invoiceNumber,
+        totalAmount,
+        customerName
+      });
+    } catch (e) {
+      console.error('[Socket Sync] Failed to emit sale socket event:', e);
+    }
+
+    const populatedSale = await Sale.findById(sale._id)
+      .populate('customer', 'name phone email walletBalance')
+      .populate('cashier', 'name email')
+      .populate('items.product', 'name sku');
+
+    res.status(200).json({
+      success: true,
+      data: populatedSale,
+    });
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    next(error);
+  } finally {
+    if (session) session.endSession();
   }
 };
