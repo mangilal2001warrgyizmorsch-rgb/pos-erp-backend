@@ -5,12 +5,21 @@ import Sale from '../models/Sale.js';
 // @route   POST /api/shifts/open
 export const openShift = async (req, res, next) => {
   try {
-    const { openingCash, counter, notes } = req.body;
+    const { openingCash, cashierName, counter, notes } = req.body;
+    const normalizedCashierName = String(cashierName || '').trim();
+    const openingAmount = Number(openingCash || 0);
 
-    if (openingCash !== undefined && Number(openingCash) < 0) {
+    if (openingAmount < 0) {
       return res.status(400).json({
         success: false,
         message: 'Opening cash cannot be negative',
+      });
+    }
+
+    if (!normalizedCashierName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cashier name is required',
       });
     }
 
@@ -29,7 +38,8 @@ export const openShift = async (req, res, next) => {
 
     const shift = await Shift.create({
       cashier: req.user._id,
-      openingCash: openingCash || 0,
+      cashierName: normalizedCashierName,
+      openingCash: openingAmount,
       counter: counter || 'Main Counter',
       notes,
     });
@@ -98,11 +108,12 @@ export const getCurrentShift = async (req, res, next) => {
 export const closeShift = async (req, res, next) => {
   try {
     const { closingCash, notes } = req.body;
+    const closingAmount = Number(closingCash);
 
-    if (closingCash !== undefined && Number(closingCash) < 0) {
+    if (!Number.isFinite(closingAmount) || closingAmount < 0) {
       return res.status(400).json({
         success: false,
-        message: 'Closing cash cannot be negative',
+        message: 'Please enter valid closing cash',
       });
     }
 
@@ -127,17 +138,24 @@ export const closeShift = async (req, res, next) => {
 
     let totalSales = 0;
     let totalSalesCash = 0;
+    let totalSalesCard = 0;
+    let totalSalesUpi = 0;
     sales.forEach(sale => {
       totalSales += sale.totalAmount;
       if (sale.paymentMethod === 'cash') totalSalesCash += sale.totalAmount;
+      else if (sale.paymentMethod === 'card') totalSalesCard += sale.totalAmount;
+      else if (sale.paymentMethod === 'upi') totalSalesUpi += sale.totalAmount;
     });
 
     shift.closingTime = new Date();
-    shift.closingCash = closingCash;
+    shift.closingCash = closingAmount;
+    shift.actualCash = closingAmount;
     shift.totalSales = totalSales;
     shift.totalSalesCash = totalSalesCash;
+    shift.totalSalesCard = totalSalesCard;
+    shift.totalSalesUpi = totalSalesUpi;
     shift.expectedCash = shift.openingCash + totalSalesCash + (shift.cashIn || 0) - (shift.cashOut || 0);
-    shift.difference = closingCash - shift.expectedCash;
+    shift.difference = closingAmount - shift.expectedCash;
     shift.status = 'closed';
     shift.notes = notes || shift.notes;
 

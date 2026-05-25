@@ -7,6 +7,11 @@ const shiftSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    cashierName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     counter: {
       type: String, // E.g. "Main Counter", "Counter 2"
       default: 'Main Counter',
