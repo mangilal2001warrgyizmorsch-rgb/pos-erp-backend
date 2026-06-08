@@ -530,6 +530,8 @@ export const initializeAccountingSettings = async () => {
         "PRIMARY_BANK",
         "SALES",
         "PURCHASE",
+        "SALES_RETURN",
+        "PURCHASE_RETURN",
         "ROUND_OFF",
         "DISCOUNT_GIVEN",
         "DISCOUNT_RECEIVED",

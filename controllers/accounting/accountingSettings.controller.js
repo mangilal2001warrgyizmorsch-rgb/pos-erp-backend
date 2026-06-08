@@ -9,6 +9,7 @@ import {
   getChartOfAccounts,
   initializeAccounting,
 } from "../../services/accounting/accounting.service.js";
+import { initializeAccountingSettings } from "../../services/accounting/seedAccounting.service.js";
 
 export const getStatus = async (req, res) => {
   try {
@@ -105,7 +106,12 @@ export const getAccountingDashboard = async (req, res) => {
 
 export const getAccountingSettings = async (req, res) => {
   try {
-    const settings = await AccountingSettings.findOne()
+    let baseSettings = await AccountingSettings.findOne();
+    if (!baseSettings) {
+      baseSettings = await initializeAccountingSettings();
+    }
+
+    const settings = await AccountingSettings.findById(baseSettings._id)
       .populate("defaultCashLedgerId", "name code")
       .populate("defaultBankLedgerId", "name code")
       .populate("defaultSalesLedgerId", "name code")
@@ -124,9 +130,77 @@ export const getAccountingSettings = async (req, res) => {
   }
 };
 
+const populateAccountingSettings = (query) => query
+  .populate("defaultCashLedgerId", "name code")
+  .populate("defaultBankLedgerId", "name code")
+  .populate("defaultSalesLedgerId", "name code")
+  .populate("defaultPurchaseLedgerId", "name code")
+  .populate("defaultSalesReturnLedgerId", "name code")
+  .populate("defaultPurchaseReturnLedgerId", "name code")
+  .populate("defaultRoundOffLedgerId", "name code")
+  .populate("defaultDiscountGivenLedgerId", "name code")
+  .populate("defaultDiscountReceivedLedgerId", "name code")
+  .populate("defaultStockLedgerId", "name code")
+  .populate("defaultCOGSLedgerId", "name code");
+
 export const updateAccountingSettings = async (req, res) => {
   try {
-    const settings = await AccountingSettings.findOneAndUpdate({}, req.body, {
+    const allowedFields = [
+      "accountingEnabled",
+      "gstAccountingEnabled",
+      "inventoryAccountingEnabled",
+      "autoVoucherPosting",
+      "allowManualJournalEntry",
+      "allowBackdatedVouchers",
+      "lockBooksTillDate",
+      "defaultCashLedgerId",
+      "defaultBankLedgerId",
+      "defaultSalesLedgerId",
+      "defaultPurchaseLedgerId",
+      "defaultSalesReturnLedgerId",
+      "defaultPurchaseReturnLedgerId",
+      "defaultRoundOffLedgerId",
+      "defaultDiscountGivenLedgerId",
+      "defaultDiscountReceivedLedgerId",
+      "defaultStockLedgerId",
+      "defaultCOGSLedgerId",
+    ];
+
+    const updates = {};
+    allowedFields.forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        updates[field] = req.body[field] === "" ? null : req.body[field];
+      }
+    });
+
+    let existing = await AccountingSettings.findOne().sort({ createdAt: 1 });
+    if (!existing) {
+      existing = await AccountingSettings.create(updates);
+    } else {
+      await AccountingSettings.updateMany({}, updates, { runValidators: true });
+      existing = await AccountingSettings.findByIdAndUpdate(existing._id, updates, {
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      });
+    }
+
+    const settings = await populateAccountingSettings(
+      AccountingSettings.findById(existing._id),
+    );
+
+    res.status(200).json({ success: true, data: settings });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+export const enableAccountingController = async (req, res) => {
+  try {
+    const settings = await AccountingSettings.findOneAndUpdate({}, {
+      accountingEnabled: true,
+      autoVoucherPosting: true,
+    }, {
       new: true,
       upsert: true,
       runValidators: true,

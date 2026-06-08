@@ -4,7 +4,7 @@ const accountingSettingsSchema = new mongoose.Schema(
   {
     accountingEnabled: {
       type: Boolean,
-      default: false,
+      default: true,
     },
     gstAccountingEnabled: {
       type: Boolean,
