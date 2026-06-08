@@ -43,6 +43,14 @@ const accountingSettingsSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ledger",
     },
+    defaultSalesReturnLedgerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ledger",
+    },
+    defaultPurchaseReturnLedgerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ledger",
+    },
     defaultRoundOffLedgerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ledger",

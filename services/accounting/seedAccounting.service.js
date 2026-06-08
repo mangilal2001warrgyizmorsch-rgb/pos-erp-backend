@@ -544,6 +544,8 @@ export const initializeAccountingSettings = async () => {
     defaultBankLedgerId: ledgersByCode.PRIMARY_BANK?._id,
     defaultSalesLedgerId: ledgersByCode.SALES?._id,
     defaultPurchaseLedgerId: ledgersByCode.PURCHASE?._id,
+    defaultSalesReturnLedgerId: ledgersByCode.SALES_RETURN?._id,
+    defaultPurchaseReturnLedgerId: ledgersByCode.PURCHASE_RETURN?._id,
     defaultRoundOffLedgerId: ledgersByCode.ROUND_OFF?._id,
     defaultDiscountGivenLedgerId: ledgersByCode.DISCOUNT_GIVEN?._id,
     defaultDiscountReceivedLedgerId: ledgersByCode.DISCOUNT_RECEIVED?._id,

@@ -110,6 +110,8 @@ export const getAccountingSettings = async (req, res) => {
       .populate("defaultBankLedgerId", "name code")
       .populate("defaultSalesLedgerId", "name code")
       .populate("defaultPurchaseLedgerId", "name code")
+      .populate("defaultSalesReturnLedgerId", "name code")
+      .populate("defaultPurchaseReturnLedgerId", "name code")
       .populate("defaultRoundOffLedgerId", "name code")
       .populate("defaultDiscountGivenLedgerId", "name code")
       .populate("defaultDiscountReceivedLedgerId", "name code")
