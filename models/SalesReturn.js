@@ -193,6 +193,26 @@ const salesReturnSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    accountingVoucherId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Voucher',
+    },
+    accountingPosted: {
+      type: Boolean,
+      default: false,
+    },
+    accountingPostedAt: {
+      type: Date,
+    },
+    accountingStatus: {
+      type: String,
+      enum: ['not_posted', 'posted', 'failed'],
+      default: 'not_posted',
+    },
+    accountingError: {
+      type: String,
+      default: '',
+    },
     cashier: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

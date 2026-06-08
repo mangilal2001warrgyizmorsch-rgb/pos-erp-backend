@@ -14,6 +14,7 @@ import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
 import { recordStockMovement } from '../utils/stockMovement.js';
+import { postPurchaseAccountingVoucher } from '../services/accounting/purchaseAccounting.service.js';
 
 export const createPurchase = async (req, res, next) => {
   const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
@@ -71,7 +72,7 @@ export const createPurchase = async (req, res, next) => {
       totalAmount,
       paymentMethod,
       paymentStatus: paymentStatus || 'paid',
-      amountPaid: amountPaid || totalAmount,
+      amountPaid: amountPaid ?? totalAmount,
       status: status || 'confirmed',
       notes,
       cashBankAccountId,
@@ -191,6 +192,12 @@ export const createPurchase = async (req, res, next) => {
       }, session);
     }
 
+    await postPurchaseAccountingVoucher(purchase, {
+      session,
+      createdBy: req.user._id,
+      source: 'create_purchase',
+    });
+
     if (session) {
       await session.commitTransaction();
     }
@@ -211,6 +218,7 @@ export const createPurchase = async (req, res, next) => {
       .populate('supplier', 'name mobile gstNumber outstandingBalance')
       .populate('transporter', 'name vehicleNumber')
       .populate('createdBy', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku');
 
     res.status(201).json({
@@ -290,6 +298,7 @@ export const getPurchase = async (req, res, next) => {
       .populate('supplier', 'name phone address gstNumber')
       .populate('transporter', 'name phone vehicleNumber')
       .populate('createdBy', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku image hsnCode unit');
 
     if (!purchase) {
@@ -646,6 +655,12 @@ export const updatePurchase = async (req, res, next) => {
       }, session);
     }
 
+    await postPurchaseAccountingVoucher(purchase, {
+      session,
+      createdBy: req.user._id,
+      source: 'create_purchase',
+    });
+
     if (session) {
       await session.commitTransaction();
     }
@@ -666,6 +681,7 @@ export const updatePurchase = async (req, res, next) => {
       .populate('supplier', 'name mobile gstNumber outstandingBalance')
       .populate('transporter', 'name vehicleNumber')
       .populate('createdBy', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku');
 
     res.status(200).json({

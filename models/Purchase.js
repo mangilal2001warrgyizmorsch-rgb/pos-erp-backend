@@ -152,6 +152,27 @@ const purchaseSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    accountingVoucherId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Voucher',
+    },
+    accountingPosted: {
+      type: Boolean,
+      default: false,
+    },
+    accountingPostedAt: {
+      type: Date,
+    },
+    accountingStatus: {
+      type: String,
+      enum: ['not_posted', 'posted', 'failed'],
+      default: 'not_posted',
+    },
+    accountingError: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
   },
   {
     timestamps: true,
@@ -163,5 +184,6 @@ const purchaseSchema = new mongoose.Schema(
 purchaseSchema.index({ status: 1, createdAt: -1 });
 purchaseSchema.index({ supplier: 1, createdAt: -1 });
 purchaseSchema.index({ 'items.product': 1, createdAt: -1 });
+purchaseSchema.index({ accountingStatus: 1, createdAt: -1 });
 
 export default mongoose.model('Purchase', purchaseSchema);

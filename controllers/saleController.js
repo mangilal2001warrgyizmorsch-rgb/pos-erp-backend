@@ -13,6 +13,10 @@ import { recordStockMovement } from '../utils/stockMovement.js';
 import BankAccount from '../models/BankAccount.js';
 import CashBankTransaction from '../models/CashBankTransaction.js';
 import PartyLedger from '../models/PartyLedger.js';
+import {
+  markSaleAccountingFailure,
+  postSaleAccountingVoucher,
+} from '../services/accounting/salesAccounting.service.js';
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -190,6 +194,13 @@ export const createSale = async (req, res, next) => {
       await session.commitTransaction();
     }
 
+    try {
+      await postSaleAccountingVoucher(sale, { createdBy: req.user._id });
+    } catch (accountingError) {
+      await markSaleAccountingFailure(sale._id, accountingError);
+      console.error('[Accounting] Failed to post sale voucher:', accountingError);
+    }
+
     // Emit live real-time WebSocket socket broadcast
     try {
       emitSocketEvent('sale:created', {
@@ -205,6 +216,7 @@ export const createSale = async (req, res, next) => {
     const populatedSale = await Sale.findById(sale._id)
       .populate('customer', 'name phone email walletBalance')
       .populate('cashier', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku');
 
     res.status(201).json({
@@ -314,6 +326,7 @@ export const getSale = async (req, res, next) => {
     const sale = await Sale.findById(req.params.id)
       .populate('customer', 'name phone email address')
       .populate('cashier', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku image');
 
     if (!sale) {

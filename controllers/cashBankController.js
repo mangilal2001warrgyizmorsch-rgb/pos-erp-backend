@@ -7,6 +7,10 @@ import {
   getCashBankSummaryInternal,
   ensureDefaultAccounts
 } from '../services/cashBankTransactionService.js';
+import {
+  postBankTransferVoucher,
+  postCashBankTransactionVoucher,
+} from '../services/accounting/cashBankAccounting.service.js';
 
 // @desc    Get all cash & bank transactions with advanced filters
 // @route   GET /api/cash-bank/transactions
@@ -101,10 +105,17 @@ export const getAccounts = async (req, res) => {
 // @route   POST /api/cash-bank/cash-entry
 // @access  Private
 export const createCashEntry = async (req, res) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) {
+    session.startTransaction();
+  }
+
   try {
     const { entryType, amount, date, reason, notes, accountId } = req.body;
     
     if (!entryType || !amount) {
+      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'Entry type and amount are required' });
     }
 
@@ -120,11 +131,27 @@ export const createCashEntry = async (req, res) => {
       referenceModule: 'cash_entry',
       createdBy: req.user._id,
       metadata: { reason }
-    });
+    }, session);
 
-    res.status(201).json({ success: true, data: transaction, message: 'Cash entry saved successfully' });
+    await postCashBankTransactionVoucher(transaction, { createdBy: req.user._id }, { session });
+
+    if (session) {
+      await session.commitTransaction();
+    }
+
+    const postedTransaction = await CashBankTransaction.findById(transaction._id)
+      .populate('accountId', 'accountName accountNumber bankName');
+
+    res.status(201).json({ success: true, data: postedTransaction || transaction, message: 'Cash entry saved successfully' });
   } catch (error) {
+    if (session) {
+      await session.abortTransaction();
+    }
     res.status(500).json({ success: false, message: error.message });
+  } finally {
+    if (session) {
+      session.endSession();
+    }
   }
 };
 
@@ -139,9 +166,11 @@ export const createBankTransfer = async (req, res) => {
   }
 
   try {
-    const { fromAccountId, toAccountId, amount, date, notes } = req.body;
+    const { fromAccountId, toAccountId, amount, date, notes, remarks } = req.body;
+    const description = notes || remarks;
 
     if (!fromAccountId || !toAccountId || !amount) {
+      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: 'Source, destination, and amount are required' });
     }
 
@@ -183,7 +212,7 @@ export const createBankTransfer = async (req, res) => {
       paymentMode: fromAccount.accountType === 'cash' ? 'Cash' : 'Bank',
       accountType: fromAccount.accountType,
       accountId: actualFromAccountId,
-      description: notes || `Transfer to ${toAccount.accountName}`,
+      description: description || `Transfer to ${toAccount.accountName}`,
       referenceModule: 'bank_transfer',
       referenceId: transferId,
       referenceNo: 'TRF-' + Math.floor(Math.random() * 100000),
@@ -200,13 +229,15 @@ export const createBankTransfer = async (req, res) => {
       paymentMode: toAccount.accountType === 'cash' ? 'Cash' : 'Bank',
       accountType: toAccount.accountType,
       accountId: actualToAccountId,
-      description: notes || `Transfer from ${fromAccount.accountName}`,
+      description: description || `Transfer from ${fromAccount.accountName}`,
       referenceModule: 'bank_transfer',
       referenceId: transferId,
       referenceNo: sourceTx.referenceNo,
       createdBy: req.user._id,
       metadata: { transferId, fromAccountId: actualFromAccountId }
     }, session);
+
+    await postBankTransferVoucher(transferId, sourceTx, destTx, { createdBy: req.user._id }, { session });
 
     if (session) {
       await session.commitTransaction();
@@ -294,7 +325,7 @@ export const createAccount = async (req, res) => {
 
     // Create a transaction log for opening balance if greater than 0
     if (Number(openingBalance) > 0) {
-      await createCashBankTransaction({
+      const openingTx = await createCashBankTransaction({
         type: 'opening_cash',
         direction: 'in',
         amount: Number(openingBalance),
@@ -304,6 +335,7 @@ export const createAccount = async (req, res) => {
         description: `Opening balance for ${accountName}`,
         createdBy: req.user._id
       });
+      await postCashBankTransactionVoucher(openingTx, { createdBy: req.user._id });
     }
 
     res.status(201).json({ success: true, data: newAccount, message: 'Account created successfully' });

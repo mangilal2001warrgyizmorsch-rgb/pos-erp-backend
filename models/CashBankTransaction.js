@@ -76,6 +76,15 @@ const cashBankTransactionSchema = new mongoose.Schema({
   metadata: { type: mongoose.Schema.Types.Mixed }
 }, { timestamps: true });
 
+// Accounting metadata
+cashBankTransactionSchema.add({
+  accountingVoucherId: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher' },
+  accountingPosted: { type: Boolean, default: false },
+  accountingPostedAt: { type: Date },
+  accountingStatus: { type: String, enum: ['not_posted', 'posted', 'failed'], default: 'not_posted' },
+  accountingError: { type: String },
+});
+
 // Indexes for super-fast dashboard statistics & filtering
 cashBankTransactionSchema.index({ type: 1, direction: 1, date: -1 });
 cashBankTransactionSchema.index({ accountId: 1, date: -1 });

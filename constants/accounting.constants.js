@@ -1,0 +1,68 @@
+export const ACCOUNT_NATURE = Object.freeze({
+  ASSET: "ASSET",
+  LIABILITY: "LIABILITY",
+  INCOME: "INCOME",
+  EXPENSE: "EXPENSE",
+});
+
+export const NORMAL_BALANCE = Object.freeze({
+  DEBIT: "DEBIT",
+  CREDIT: "CREDIT",
+});
+
+export const ACCOUNTING_VOUCHER_TYPES = Object.freeze({
+  SALES: "SALES",
+  PURCHASE: "PURCHASE",
+  RECEIPT: "RECEIPT",
+  PAYMENT: "PAYMENT",
+  CONTRA: "CONTRA",
+  JOURNAL: "JOURNAL",
+  CREDIT_NOTE: "CREDIT_NOTE",
+  DEBIT_NOTE: "DEBIT_NOTE",
+  EXPENSE: "EXPENSE",
+  STOCK_JOURNAL: "STOCK_JOURNAL",
+});
+
+export const VOUCHER_STATUS = Object.freeze({
+  DRAFT: "DRAFT",
+  POSTED: "POSTED",
+  CANCELLED: "CANCELLED",
+  REVERSED: "REVERSED",
+});
+
+export const LEDGER_TYPES = Object.freeze({
+  CASH: "CASH",
+  BANK: "BANK",
+  CUSTOMER: "CUSTOMER",
+  SUPPLIER: "SUPPLIER",
+  SALES: "SALES",
+  SALES_RETURN: "SALES_RETURN",
+  PURCHASE: "PURCHASE",
+  PURCHASE_RETURN: "PURCHASE_RETURN",
+  TAX: "TAX",
+  EXPENSE: "EXPENSE",
+  INCOME: "INCOME",
+  STOCK: "STOCK",
+  ROUND_OFF: "ROUND_OFF",
+  DISCOUNT: "DISCOUNT",
+  OTHER: "OTHER",
+});
+
+export const PARTY_TYPES = Object.freeze({
+  CUSTOMER: "customer",
+  SUPPLIER: "supplier",
+  NONE: "none",
+});
+
+export const NUMBERING_METHODS = Object.freeze({
+  AUTOMATIC: "automatic",
+  MANUAL: "manual",
+});
+
+export const ACCOUNT_NATURE_VALUES = Object.values(ACCOUNT_NATURE);
+export const NORMAL_BALANCE_VALUES = Object.values(NORMAL_BALANCE);
+export const ACCOUNTING_VOUCHER_TYPE_VALUES = Object.values(ACCOUNTING_VOUCHER_TYPES);
+export const VOUCHER_STATUS_VALUES = Object.values(VOUCHER_STATUS);
+export const LEDGER_TYPE_VALUES = Object.values(LEDGER_TYPES);
+export const PARTY_TYPE_VALUES = Object.values(PARTY_TYPES);
+export const NUMBERING_METHOD_VALUES = Object.values(NUMBERING_METHODS);

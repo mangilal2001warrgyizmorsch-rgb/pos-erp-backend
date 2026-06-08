@@ -47,6 +47,18 @@ const bankAccountSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   },
+  accountingLedgerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Ledger',
+  },
+  accountingLinked: {
+    type: Boolean,
+    default: false,
+  },
+  accountingOpeningPosted: {
+    type: Boolean,
+    default: false,
+  },
 }, {
   timestamps: true,
 });

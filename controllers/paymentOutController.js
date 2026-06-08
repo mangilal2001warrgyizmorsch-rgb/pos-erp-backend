@@ -8,6 +8,7 @@ import Counter from '../models/Counter.js';
 import mongoose from 'mongoose';
 import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
+import { postPaymentOutAccountingVoucher } from '../services/accounting/paymentAccounting.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create a new payment out
@@ -33,6 +34,10 @@ export const createPaymentOut = async (req, res) => {
       date
     } = req.body;
 
+    const sanitizeObjectId = (value) => value ? value : undefined;
+    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
+    const linkedPurchaseIdClean = sanitizeObjectId(linkedPurchaseId);
+
     const supplier = await Supplier.findById(partyId).session(session);
     if (!supplier) throw new Error('Supplier not found');
 
@@ -51,8 +56,8 @@ export const createPaymentOut = async (req, res) => {
       partyName: supplier.name,
       amountPaid,
       paymentMode,
-      cashBankAccountId,
-      linkedPurchaseId,
+      cashBankAccountId: cashBankAccountIdClean,
+      linkedPurchaseId: linkedPurchaseIdClean,
       referenceNo,
       description,
       attachments,
@@ -68,8 +73,8 @@ export const createPaymentOut = async (req, res) => {
       direction: 'out',
       amount: amountPaid,
       paymentMode,
-      accountType: cashBankAccountId ? 'bank' : 'cash',
-      accountId: cashBankAccountId || undefined,
+      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      accountId: cashBankAccountIdClean || undefined,
       partyId,
       partyType: 'Supplier',
       referenceModule: 'payment_out',
@@ -92,8 +97,8 @@ export const createPaymentOut = async (req, res) => {
     }, session);
 
     // 5. Update Linked Purchase if any
-    if (linkedPurchaseId) {
-      const purchase = await Purchase.findById(linkedPurchaseId).session(session);
+    if (linkedPurchaseIdClean) {
+      const purchase = await Purchase.findById(linkedPurchaseIdClean).session(session);
       if (purchase) {
         const newAmountPaid = (purchase.amountPaid || 0) + Number(amountPaid);
         let paymentStatus = 'partial';
@@ -101,7 +106,7 @@ export const createPaymentOut = async (req, res) => {
           paymentStatus = 'paid';
         }
         await Purchase.findByIdAndUpdate(
-          linkedPurchaseId,
+          linkedPurchaseIdClean,
           { 
             $set: { 
               amountPaid: newAmountPaid,
@@ -112,6 +117,12 @@ export const createPaymentOut = async (req, res) => {
         );
       }
     }
+
+    await postPaymentOutAccountingVoucher(paymentOut, {
+      session,
+      createdBy: req.user._id,
+      source: 'payment_out',
+    });
 
     if (session) {
       await session.commitTransaction();
@@ -156,7 +167,10 @@ export const getPaymentOuts = async (req, res) => {
     if (partyId) query.partyId = partyId;
     if (paymentMode) query.paymentMode = paymentMode;
 
-    const payments = await PaymentOut.find(query).sort({ date: -1, createdAt: -1 }).populate('partyId', 'name phone');
+    const payments = await PaymentOut.find(query)
+      .sort({ date: -1, createdAt: -1 })
+      .populate('partyId', 'name phone')
+      .populate('accountingVoucherId', 'voucherNo status date');
     res.status(200).json({ success: true, data: payments });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -168,7 +182,10 @@ export const getPaymentOuts = async (req, res) => {
 // @access  Private
 export const getPaymentOutById = async (req, res) => {
   try {
-    const payment = await PaymentOut.findById(req.params.id).populate('partyId', 'name phone address').populate('linkedPurchaseId');
+    const payment = await PaymentOut.findById(req.params.id)
+      .populate('partyId', 'name phone address')
+      .populate('linkedPurchaseId')
+      .populate('accountingVoucherId', 'voucherNo status date');
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
@@ -257,6 +274,10 @@ export const updatePaymentOut = async (req, res) => {
       date
     } = req.body;
 
+    const sanitizeObjectId = (value) => value ? value : undefined;
+    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
+    const linkedPurchaseIdClean = sanitizeObjectId(linkedPurchaseId);
+
     // 1. Revert Old Effects
     // Revert account balance
     let oldAccount;
@@ -306,8 +327,8 @@ export const updatePaymentOut = async (req, res) => {
     payment.partyName = newSupplier.name;
     payment.amountPaid = amountPaid;
     payment.paymentMode = paymentMode;
-    payment.cashBankAccountId = cashBankAccountId;
-    payment.linkedPurchaseId = linkedPurchaseId;
+    payment.cashBankAccountId = cashBankAccountIdClean;
+    payment.linkedPurchaseId = linkedPurchaseIdClean;
     payment.referenceNo = referenceNo;
     payment.description = description;
     payment.attachments = attachments;
@@ -317,8 +338,8 @@ export const updatePaymentOut = async (req, res) => {
 
     // Apply new account balance
     let newAccount;
-    if (cashBankAccountId) {
-      newAccount = await BankAccount.findById(cashBankAccountId).session(session);
+    if (cashBankAccountIdClean) {
+      newAccount = await BankAccount.findById(cashBankAccountIdClean).session(session);
     } else {
       newAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
     }
@@ -338,8 +359,8 @@ export const updatePaymentOut = async (req, res) => {
       direction: 'out',
       amount: amountPaid,
       paymentMode,
-      accountType: cashBankAccountId ? 'bank' : 'cash',
-      accountId: cashBankAccountId || undefined,
+      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      accountId: cashBankAccountIdClean || undefined,
       partyId: newPartyId,
       partyType: 'Supplier',
       referenceModule: 'payment_out',
@@ -362,8 +383,8 @@ export const updatePaymentOut = async (req, res) => {
     }, session);
 
     // Update new Linked Purchase
-    if (linkedPurchaseId) {
-      const newPurchase = await Purchase.findById(linkedPurchaseId).session(session);
+    if (linkedPurchaseIdClean) {
+      const newPurchase = await Purchase.findById(linkedPurchaseIdClean).session(session);
       if (newPurchase) {
         const newAmountPaid = (newPurchase.amountPaid || 0) + Number(amountPaid);
         let paymentStatus = 'partial';
@@ -371,7 +392,7 @@ export const updatePaymentOut = async (req, res) => {
           paymentStatus = 'paid';
         }
         await Purchase.findByIdAndUpdate(
-          linkedPurchaseId,
+          linkedPurchaseIdClean,
           { 
             $set: { 
               amountPaid: newAmountPaid,

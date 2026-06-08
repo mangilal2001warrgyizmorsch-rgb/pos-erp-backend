@@ -13,6 +13,7 @@ import { createCashBankTransaction } from '../services/cashBankTransactionServic
 import { recordStockMovement } from '../utils/stockMovement.js';
 import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
+import { postSaleReturnAccountingVoucher } from '../services/accounting/returnAccounting.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create Sale Return / Credit Note
@@ -258,6 +259,12 @@ export const createSaleReturn = async (req, res, next) => {
       date: returnDate || new Date()
     }, session);
 
+    await postSaleReturnAccountingVoucher(saleReturn, {
+      session,
+      createdBy: req.user._id,
+      source: 'sale_return',
+    });
+
     // 11. Save sale return
     await saleReturn.save({ session });
 
@@ -287,6 +294,7 @@ export const createSaleReturn = async (req, res, next) => {
     const populatedReturn = await SalesReturn.findById(saleReturn._id)
       .populate('customer', 'name phone email')
       .populate('cashier', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku');
 
     emitSocketEvent('salesReturn:created', populatedReturn);
@@ -347,6 +355,7 @@ export const getSaleReturns = async (req, res, next) => {
     const returns = await SalesReturn.find(query)
       .populate('customer', 'name phone email')
       .populate('cashier', 'name')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .sort('-returnDate')
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit));
@@ -373,6 +382,7 @@ export const getSaleReturn = async (req, res, next) => {
     const saleReturn = await SalesReturn.findById(req.params.id)
       .populate('customer', 'name phone email address gstNumber')
       .populate('cashier', 'name email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku image');
 
     if (!saleReturn) {

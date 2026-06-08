@@ -143,6 +143,27 @@ const saleSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    accountingVoucherId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Voucher',
+    },
+    accountingPosted: {
+      type: Boolean,
+      default: false,
+    },
+    accountingPostedAt: {
+      type: Date,
+    },
+    accountingStatus: {
+      type: String,
+      enum: ['not_posted', 'posted', 'failed'],
+      default: 'not_posted',
+    },
+    accountingError: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
   },
   {
     timestamps: true,
@@ -154,5 +175,6 @@ const saleSchema = new mongoose.Schema(
 saleSchema.index({ status: 1, createdAt: -1 });
 saleSchema.index({ customer: 1, createdAt: -1 });
 saleSchema.index({ 'items.product': 1, createdAt: -1 });
+saleSchema.index({ accountingStatus: 1, createdAt: -1 });
 
 export default mongoose.model('Sale', saleSchema);

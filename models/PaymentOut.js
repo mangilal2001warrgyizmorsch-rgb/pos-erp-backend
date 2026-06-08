@@ -13,6 +13,12 @@ const paymentOutSchema = new mongoose.Schema({
   attachments: [{ type: String }],
   date: { type: Date, required: true, default: Date.now },
   status: { type: String, default: "completed" },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  accountingVoucherId: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher' },
+  accountingPosted: { type: Boolean, default: false },
+  accountingPostedAt: { type: Date },
+  accountingStatus: { type: String, enum: ["not_posted", "posted", "failed"], default: "not_posted" },
+  accountingError: { type: String },
 }, { timestamps: true });
 
 export default mongoose.model("PaymentOut", paymentOutSchema);

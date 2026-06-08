@@ -13,6 +13,7 @@ import { createCashBankTransaction } from '../services/cashBankTransactionServic
 import { recordStockMovement } from '../utils/stockMovement.js';
 import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
+import { postPurchaseReturnAccountingVoucher } from '../services/accounting/returnAccounting.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create Purchase Return / Debit Note
@@ -249,6 +250,12 @@ export const createPurchaseReturn = async (req, res, next) => {
       date: returnDate || new Date()
     }, session);
 
+    await postPurchaseReturnAccountingVoucher(purchaseReturn, {
+      session,
+      createdBy: req.user._id,
+      source: 'purchase_return',
+    });
+
     // 11. Save purchase return
     await purchaseReturn.save({ session });
 
@@ -277,6 +284,7 @@ export const createPurchaseReturn = async (req, res, next) => {
 
     const populatedReturn = await PurchaseReturn.findById(purchaseReturn._id)
       .populate('supplier', 'name phone email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku');
 
     emitSocketEvent('purchaseReturn:created', populatedReturn);
@@ -336,6 +344,7 @@ export const getPurchaseReturns = async (req, res, next) => {
     const total = await PurchaseReturn.countDocuments(query);
     const returns = await PurchaseReturn.find(query)
       .populate('supplier', 'name phone email')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .sort('-returnDate')
       .limit(parseInt(limit))
       .skip((parseInt(page) - 1) * parseInt(limit));
@@ -361,6 +370,7 @@ export const getPurchaseReturn = async (req, res, next) => {
   try {
     const purchaseReturn = await PurchaseReturn.findById(req.params.id)
       .populate('supplier', 'name phone email address gstNumber')
+      .populate('accountingVoucherId', 'voucherNo date status totalDebit totalCredit')
       .populate('items.product', 'name sku image');
 
     if (!purchaseReturn) {
