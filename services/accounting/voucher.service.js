@@ -4,7 +4,10 @@ import Voucher from "../../models/accounting/Voucher.model.js";
 import VoucherEntry from "../../models/accounting/VoucherEntry.model.js";
 import VoucherType from "../../models/accounting/VoucherType.model.js";
 import FinancialYear from "../../models/accounting/FinancialYear.model.js";
+import AccountingSettings from "../../models/accounting/AccountingSettings.model.js";
 import { VOUCHER_STATUS } from "../../constants/accounting.constants.js";
+import { createAccountingError } from "../../utils/accountingError.js";
+import { createAuditLog } from "../auditLog.service.js";
 import { updateLedgerBalance } from "./ledger.service.js";
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
@@ -52,6 +55,82 @@ const executeAccountingWrite = async (operation, session = null) => {
 
 const getActiveFinancialYear = async (session = null) => {
   const query = FinancialYear.findOne({ isActive: true, isClosed: false });
+  if (session) query.session(session);
+  return query;
+};
+
+export const getFinancialYearByDate = async (date, session = null) => {
+  const voucherDate = new Date(date || Date.now());
+  voucherDate.setHours(0, 0, 0, 0);
+  const query = FinancialYear.findOne({
+    startDate: { $lte: voucherDate },
+    endDate: { $gte: voucherDate },
+    isActive: true,
+    isClosed: false,
+  });
+  if (session) query.session(session);
+  return query;
+};
+
+const formatDate = (value) => new Intl.DateTimeFormat("en-IN", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+}).format(new Date(value));
+
+const assertBooksUnlocked = async (date, session = null) => {
+  const query = AccountingSettings.findOne().select("lockBooksTillDate");
+  if (session) query.session(session);
+  const settings = await query;
+  if (!settings?.lockBooksTillDate) return;
+
+  const voucherDate = new Date(date || Date.now());
+  voucherDate.setHours(0, 0, 0, 0);
+  const lockDate = new Date(settings.lockBooksTillDate);
+  lockDate.setHours(23, 59, 59, 999);
+  if (voucherDate <= lockDate) {
+    throw createAccountingError(
+      "BOOKS_LOCKED",
+      `Books are locked till ${formatDate(lockDate)}. Accounting entry cannot be modified.`,
+      { lockBooksTillDate: settings.lockBooksTillDate, voucherDate },
+    );
+  }
+};
+
+const resolveOpenFinancialYear = async (date, providedFinancialYearId, session = null) => {
+  const voucherDate = new Date(date || Date.now());
+  if (providedFinancialYearId) {
+    const query = FinancialYear.findById(providedFinancialYearId);
+    if (session) query.session(session);
+    const financialYear = await query;
+    if (!financialYear || financialYear.isClosed) {
+      throw createAccountingError(
+        "FINANCIAL_YEAR_CLOSED",
+        "Financial year is closed or unavailable for voucher posting.",
+        { financialYearId: providedFinancialYearId },
+      );
+    }
+  }
+
+  const financialYear = await getFinancialYearByDate(voucherDate, session);
+  if (!financialYear) {
+    throw createAccountingError(
+      "FINANCIAL_YEAR_CLOSED",
+      "No active financial year found for voucher date.",
+      { voucherDate },
+    );
+  }
+  return financialYear;
+};
+
+const findExistingPostedReferenceVoucher = async (payload, session = null) => {
+  if (!payload.referenceModule || !payload.referenceId || payload.originalVoucherId) return null;
+  const query = Voucher.findOne({
+    referenceModule: payload.referenceModule,
+    referenceId: payload.referenceId,
+    voucherTypeCode: String(payload.voucherTypeCode || "").toUpperCase(),
+    status: { $ne: VOUCHER_STATUS.CANCELLED },
+  });
   if (session) query.session(session);
   return query;
 };
@@ -223,10 +302,10 @@ const createVoucherDocument = async (payload, totals, status, session) => {
     throw new Error("Voucher type not found.");
   }
   const voucherTypeCode = voucherType.code;
+  const voucherDate = payload.date || Date.now();
+  await assertBooksUnlocked(voucherDate, session);
+  const financialYear = await resolveOpenFinancialYear(voucherDate, payload.financialYearId, session);
   const voucherNo = payload.voucherNo || await generateVoucherNo(voucherTypeCode, session);
-  const financialYear = payload.financialYearId
-    ? null
-    : await getActiveFinancialYear(session);
 
   if (!voucherNo) {
     throw new Error("Voucher number is required for manual voucher types.");
@@ -238,8 +317,8 @@ const createVoucherDocument = async (payload, totals, status, session) => {
         voucherNo,
         voucherTypeId: voucherType._id,
         voucherTypeCode,
-        date: payload.date || Date.now(),
-        financialYearId: payload.financialYearId || financialYear?._id,
+        date: voucherDate,
+        financialYearId: financialYear._id,
         referenceModule: payload.referenceModule,
         referenceId: payload.referenceId,
         referenceNo: payload.referenceNo,
@@ -290,6 +369,9 @@ export const postDraftVoucher = async (voucherId, userId = null, options = {}) =
       throw new Error("Reversed voucher cannot be posted.");
     }
 
+    await assertBooksUnlocked(voucher.date, session);
+    const financialYear = await resolveOpenFinancialYear(voucher.date, voucher.financialYearId, session);
+
     const entries = await VoucherEntry.find({ voucherId: voucher._id }).session(session);
     const hydratedEntries = await hydrateEntriesWithLedgerNames(entries.map((entry) => entry.toObject()), session);
     const totals = validateVoucherEntries(hydratedEntries);
@@ -299,11 +381,20 @@ export const postDraftVoucher = async (voucherId, userId = null, options = {}) =
     voucher.totalDebit = totals.totalDebit;
     voucher.totalCredit = totals.totalCredit;
     voucher.status = VOUCHER_STATUS.POSTED;
+    voucher.financialYearId = financialYear._id;
     voucher.postedAt = new Date();
     if (!voucher.createdBy && userId) voucher.createdBy = userId;
     await voucher.save({ session });
     return voucher._id;
   }, options.session);
+
+  await createAuditLog({
+    userId,
+    action: "VOUCHER_POSTED",
+    module: "accounting_voucher",
+    referenceId: postedVoucherId,
+    description: "Accounting voucher posted",
+  });
 
   return getVoucherById(postedVoucherId);
 };
@@ -315,6 +406,24 @@ export const postVoucher = async (payloadOrVoucherId, userId = null, options = {
 
   const payload = payloadOrVoucherId || {};
   const result = await executeAccountingWrite(async (session) => {
+    const existingVoucher = await findExistingPostedReferenceVoucher(payload, session);
+    if (existingVoucher) {
+      if (options.session) {
+        const entries = await VoucherEntry.find({ voucherId: existingVoucher._id }).session(session);
+        return { voucher: existingVoucher, entries, skipped: true };
+      }
+      throw createAccountingError(
+        "DUPLICATE_VOUCHER",
+        "Accounting voucher already exists for this reference.",
+        {
+          voucherId: existingVoucher._id,
+          voucherNo: existingVoucher.voucherNo,
+          referenceModule: payload.referenceModule,
+          referenceId: payload.referenceId,
+        },
+      );
+    }
+
     const hydratedEntries = await hydrateEntriesWithLedgerNames(payload.entries || [], session);
     const totals = validateVoucherEntries(hydratedEntries);
     const voucher = await createVoucherDocument(
@@ -332,6 +441,16 @@ export const postVoucher = async (payloadOrVoucherId, userId = null, options = {
     return result;
   }
 
+  await createAuditLog({
+    userId,
+    action: "VOUCHER_CREATED",
+    module: payload.referenceModule || "accounting_voucher",
+    referenceId: result.voucher._id,
+    referenceNo: result.voucher.voucherNo,
+    description: "Accounting voucher created and posted",
+    newData: result.voucher,
+  });
+
   return getVoucherById(result.voucher._id);
 };
 
@@ -345,6 +464,8 @@ export const cancelVoucher = async (voucherId, cancellationReason, userId = null
     if (voucher.status === VOUCHER_STATUS.CANCELLED) {
       return voucher._id;
     }
+
+    await assertBooksUnlocked(voucher.date, session);
 
     if (voucher.status === VOUCHER_STATUS.POSTED) {
       if (voucher.reversalVoucherId) {
@@ -364,6 +485,14 @@ export const cancelVoucher = async (voucherId, cancellationReason, userId = null
     return voucher._id;
   });
 
+  await createAuditLog({
+    userId,
+    action: "VOUCHER_CANCELLED",
+    module: "accounting_voucher",
+    referenceId: cancelledVoucherId,
+    description: cancellationReason || "Accounting voucher cancelled",
+  });
+
   return getVoucherById(cancelledVoucherId);
 };
 
@@ -381,6 +510,8 @@ export const reverseVoucher = async (voucherId, reason, userId = null) => {
     if (voucher.reversalVoucherId) {
       throw new Error("Voucher has already been reversed.");
     }
+
+    await assertBooksUnlocked(voucher.date, session);
 
     const originalEntries = await VoucherEntry.find({ voucherId: voucher._id }).session(session);
     const reversalEntries = originalEntries.map((entry) => ({
@@ -423,6 +554,14 @@ export const reverseVoucher = async (voucherId, reason, userId = null) => {
     await voucher.save({ session });
 
     return reversalVoucher._id;
+  });
+
+  await createAuditLog({
+    userId,
+    action: "VOUCHER_REVERSED",
+    module: "accounting_voucher",
+    referenceId: reversalVoucherId,
+    description: reason || "Accounting voucher reversed",
   });
 
   return getVoucherById(reversalVoucherId);

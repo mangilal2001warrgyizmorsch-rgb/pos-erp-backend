@@ -13,7 +13,22 @@ import {
   getStatus,
   initializeAccountingFoundation,
   updateAccountingSettings,
+  validateAccountingSettingsController,
 } from "../controllers/accounting/accountingSettings.controller.js";
+import {
+  fixLedgerReconciliationController,
+  getAccountingAuditLogsController,
+  getAccountingHealthCheckController,
+  getCashBankReconciliationController,
+  getCashBankReconciliationDetailsController,
+  getGSTReconciliationController,
+  getLedgerReconciliationController,
+  getPartyReconciliationController,
+  linkCashBankLedgersController,
+  linkPartyLedgersController,
+  repostMissingAccountingBatchController,
+  repostMissingAccountingController,
+} from "../controllers/accounting/accountingHealth.controller.js";
 import {
   getAccountingReportDashboardController,
   getBalanceSheetReportController,
@@ -27,6 +42,19 @@ import {
   getTrialBalanceReportController,
 } from "../controllers/accounting/accountingReports.controller.js";
 import {
+  getGSTDebugReportController,
+  getGSTExceptionReportController,
+  getGSTLedgerReportController,
+  getGSTPartyWiseReportController,
+  getGSTPayableSummaryController,
+  getGSTSummaryController,
+  getGSTR1StyleReportController,
+  getGSTR3BStyleSummaryController,
+  getHSNSummaryController,
+  getInputGSTReportController,
+  getOutputGSTReportController,
+} from "../controllers/accounting/gstReports.controller.js";
+import {
   createLedgerController,
   deleteLedger,
   getBasicTrialBalance,
@@ -38,6 +66,7 @@ import {
   getLedgers,
   getLedgersByGroupController,
   getSystemLedgerController,
+  restoreDefaultLedgersController,
   updateLedger,
 } from "../controllers/accounting/ledger.controller.js";
 import {
@@ -79,9 +108,13 @@ router.get("/dashboard", getAccountingDashboard);
 router.post("/initialize", initializeAccountingFoundation);
 router.get("/chart-of-accounts", getChartOfAccountsController);
 router.get("/day-book", getDayBook);
+router.get("/health-check", getAccountingHealthCheckController);
+router.get("/audit-logs", getAccountingAuditLogsController);
 router.post("/journal/draft", authorize("admin"), createJournalDraftController);
 router.post("/journal/post", authorize("admin"), postJournalController);
 router.post("/test-voucher", authorize("admin"), createTestVoucherController);
+router.post("/repost/missing", authorize("admin"), repostMissingAccountingController);
+router.post("/repost/missing/batch", authorize("admin"), repostMissingAccountingBatchController);
 router.post("/repost/sale/:saleId", authorize("admin"), repostSaleAccountingController);
 router.post("/repost/purchase/:purchaseId", authorize("admin"), repostPurchaseAccountingController);
 router.post("/repost/sale-return/:returnId", authorize("admin"), repostSaleReturnAccountingController);
@@ -100,6 +133,25 @@ router.get("/reports/receivables", getReceivablesReportController);
 router.get("/reports/payables", getPayablesReportController);
 router.get("/reports/ledger-summary", getLedgerSummaryReportController);
 router.get("/reports/group-summary", getGroupSummaryReportController);
+router.get("/gst/summary", getGSTSummaryController);
+router.get("/gst/output", getOutputGSTReportController);
+router.get("/gst/input", getInputGSTReportController);
+router.get("/gst/payable-summary", getGSTPayableSummaryController);
+router.get("/gst/hsn-summary", getHSNSummaryController);
+router.get("/gst/gstr1", getGSTR1StyleReportController);
+router.get("/gst/gstr3b-summary", getGSTR3BStyleSummaryController);
+router.get("/gst/ledger", getGSTLedgerReportController);
+router.get("/gst/party-wise", getGSTPartyWiseReportController);
+router.get("/gst/exceptions", getGSTExceptionReportController);
+router.get("/gst/debug", getGSTDebugReportController);
+router.get("/reconciliation/ledgers", getLedgerReconciliationController);
+router.post("/reconciliation/ledgers/fix", authorize("admin"), fixLedgerReconciliationController);
+router.get("/reconciliation/cash-bank", getCashBankReconciliationController);
+router.get("/reconciliation/cash-bank/details", getCashBankReconciliationDetailsController);
+router.post("/reconciliation/cash-bank/link-ledgers", authorize("admin"), linkCashBankLedgersController);
+router.post("/reconciliation/parties/link-ledgers", authorize("admin"), linkPartyLedgersController);
+router.get("/reconciliation/parties", getPartyReconciliationController);
+router.get("/reconciliation/gst", getGSTReconciliationController);
 
 router
   .route("/groups")
@@ -116,6 +168,7 @@ router.get("/ledgers/code/:code", getLedgerByCodeController);
 router.get("/ledgers/group/:groupId", getLedgersByGroupController);
 router.get("/ledgers/system/:ledgerType", getSystemLedgerController);
 router.get("/ledgers/defaults", getDefaultLedgers);
+router.post("/ledgers/restore-defaults", authorize("admin"), restoreDefaultLedgersController);
 router.get("/ledgers/:id/balance", getLedgerBalance);
 router.get("/ledgers/:id/statement", getLedgerStatement);
 
@@ -159,5 +212,7 @@ router
   .route("/settings")
   .get(getAccountingSettings)
   .put(updateAccountingSettings);
+
+router.get("/settings/validate", validateAccountingSettingsController);
 
 export default router;

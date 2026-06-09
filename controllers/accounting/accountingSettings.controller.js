@@ -9,7 +9,11 @@ import {
   getChartOfAccounts,
   initializeAccounting,
 } from "../../services/accounting/accounting.service.js";
-import { initializeAccountingSettings } from "../../services/accounting/seedAccounting.service.js";
+import { createAuditLog } from "../../services/auditLog.service.js";
+import {
+  getDefaultAccountingMissingCounts,
+  initializeAccountingSettings,
+} from "../../services/accounting/seedAccounting.service.js";
 
 export const getStatus = async (req, res) => {
   try {
@@ -55,6 +59,7 @@ export const getAccountingDashboard = async (req, res) => {
       cancelledVouchers,
       reversedVouchers,
       recentVouchers,
+      missingDefaults,
     ] = await Promise.all([
       AccountingSettings.findOne().lean(),
       FinancialYear.findOne({ isActive: true, isClosed: false }).lean(),
@@ -75,6 +80,7 @@ export const getAccountingDashboard = async (req, res) => {
         .sort({ date: -1, createdAt: -1 })
         .limit(10)
         .lean(),
+      getDefaultAccountingMissingCounts(),
     ]);
 
     res.status(200).json({
@@ -86,6 +92,8 @@ export const getAccountingDashboard = async (req, res) => {
           inventoryAccountingEnabled: Boolean(settings?.inventoryAccountingEnabled),
           autoVoucherPosting: settings?.autoVoucherPosting ?? true,
           activeFinancialYear,
+          initialized: Boolean(settings) && accountGroups > 0 && ledgers > 0 && voucherTypes > 0 && Boolean(activeFinancialYear),
+          ...missingDefaults,
         },
         counts: {
           accountGroups,
@@ -174,6 +182,7 @@ export const updateAccountingSettings = async (req, res) => {
     });
 
     let existing = await AccountingSettings.findOne().sort({ createdAt: 1 });
+    const oldData = existing ? existing.toObject() : null;
     if (!existing) {
       existing = await AccountingSettings.create(updates);
     } else {
@@ -189,9 +198,77 @@ export const updateAccountingSettings = async (req, res) => {
       AccountingSettings.findById(existing._id),
     );
 
+    await createAuditLog({
+      req,
+      action: "ACCOUNTING_SETTINGS_UPDATED",
+      module: "accounting_settings",
+      referenceId: existing._id,
+      oldData,
+      newData: settings,
+      description: "Accounting settings updated",
+    });
+
     res.status(200).json({ success: true, data: settings });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+const requiredLedgerFields = [
+  ["defaultCashLedgerId", "Default Cash Ledger"],
+  ["defaultBankLedgerId", "Default Bank Ledger"],
+  ["defaultSalesLedgerId", "Default Sales Ledger"],
+  ["defaultPurchaseLedgerId", "Default Purchase Ledger"],
+  ["defaultRoundOffLedgerId", "Default Round Off Ledger"],
+  ["defaultDiscountGivenLedgerId", "Default Discount Given Ledger"],
+  ["defaultDiscountReceivedLedgerId", "Default Discount Received Ledger"],
+];
+
+export const validateAccountingSettingsController = async (req, res) => {
+  try {
+    let settings = await AccountingSettings.findOne();
+    if (!settings) settings = await initializeAccountingSettings();
+
+    const missingLedgers = [];
+    const warnings = [];
+    for (const [field, label] of requiredLedgerFields) {
+      if (!settings[field]) {
+        missingLedgers.push({ field, label, reason: "Not configured" });
+        continue;
+      }
+      const ledger = await Ledger.findOne({ _id: settings[field], isActive: true }).lean();
+      if (!ledger) missingLedgers.push({ field, label, reason: "Ledger not found or inactive" });
+    }
+
+    if (settings.gstAccountingEnabled) {
+      const gstLedgers = await Ledger.find({
+        code: { $in: ["OUTPUT_CGST", "OUTPUT_SGST", "OUTPUT_IGST", "INPUT_CGST", "INPUT_SGST", "INPUT_IGST"] },
+        isActive: true,
+      }).select("code").lean();
+      const configuredCodes = new Set(gstLedgers.map((ledger) => ledger.code));
+      ["OUTPUT_CGST", "OUTPUT_SGST", "OUTPUT_IGST", "INPUT_CGST", "INPUT_SGST", "INPUT_IGST"].forEach((code) => {
+        if (!configuredCodes.has(code)) missingLedgers.push({ field: code, label: code, reason: "GST ledger missing" });
+      });
+    }
+
+    if (settings.inventoryAccountingEnabled) {
+      if (!settings.defaultStockLedgerId) missingLedgers.push({ field: "defaultStockLedgerId", label: "Default Stock Ledger", reason: "Required when inventory accounting is enabled" });
+      if (!settings.defaultCOGSLedgerId) missingLedgers.push({ field: "defaultCOGSLedgerId", label: "Default COGS Ledger", reason: "Required when inventory accounting is enabled" });
+    }
+
+    if (!settings.accountingEnabled) warnings.push("Accounting is disabled. Business transactions will not post vouchers.");
+    if (!settings.autoVoucherPosting) warnings.push("Auto voucher posting is disabled. Use repost tools for business transactions.");
+
+    res.status(200).json({
+      success: true,
+      data: {
+        valid: missingLedgers.length === 0,
+        missingLedgers,
+        warnings,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

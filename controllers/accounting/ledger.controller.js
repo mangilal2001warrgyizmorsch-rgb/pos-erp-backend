@@ -8,6 +8,7 @@ import {
   getLedgersByGroup,
   getSystemLedger,
 } from "../../services/accounting/ledger.service.js";
+import { restoreMissingDefaultLedgers } from "../../services/accounting/seedAccounting.service.js";
 
 export const createLedgerController = async (req, res) => {
   try {
@@ -57,6 +58,15 @@ export const getDefaultLedgers = async (req, res) => {
     res.status(200).json({ success: true, count: ledgers.length, data: ledgers });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const restoreDefaultLedgersController = async (req, res) => {
+  try {
+    const result = await restoreMissingDefaultLedgers(req.user?._id);
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
   }
 };
 

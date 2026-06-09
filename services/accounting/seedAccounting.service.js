@@ -10,7 +10,7 @@ import {
   NORMAL_BALANCE,
 } from "../../constants/accounting.constants.js";
 
-const defaultAccountGroups = [
+export const defaultAccountGroups = [
   {
     name: "Assets",
     code: "ASSET",
@@ -178,7 +178,7 @@ const defaultAccountGroups = [
   },
 ];
 
-const defaultLedgerDefinitions = [
+export const defaultLedgerDefinitions = [
   {
     name: "Cash A/c",
     code: "CASH",
@@ -289,7 +289,7 @@ const defaultLedgerDefinitions = [
   },
 ];
 
-const defaultVoucherTypes = [
+export const defaultVoucherTypes = [
   { name: "Sales", code: ACCOUNTING_VOUCHER_TYPES.SALES, prefix: "SAL-" },
   { name: "Purchase", code: ACCOUNTING_VOUCHER_TYPES.PURCHASE, prefix: "PUR-" },
   { name: "Receipt", code: ACCOUNTING_VOUCHER_TYPES.RECEIPT, prefix: "REC-" },
@@ -605,6 +605,55 @@ export const initializeAccountingFoundation = async (createdBy) => {
       voucherTypesCreated,
       financialYear,
       settings,
+    },
+  };
+};
+
+export const getDefaultAccountingMissingCounts = async () => {
+  const [groups, ledgers, voucherTypes] = await Promise.all([
+    AccountGroup.find({ code: { $in: defaultAccountGroups.map((group) => group.code) } }).select("code").lean(),
+    Ledger.find({ code: { $in: defaultLedgerDefinitions.map((ledger) => ledger.code) } }).select("code").lean(),
+    VoucherType.find({ code: { $in: defaultVoucherTypes.map((voucherType) => voucherType.code) } }).select("code").lean(),
+  ]);
+
+  const existingGroupCodes = new Set(groups.map((group) => group.code));
+  const existingLedgerCodes = new Set(ledgers.map((ledger) => ledger.code));
+  const existingVoucherTypeCodes = new Set(voucherTypes.map((voucherType) => voucherType.code));
+
+  const missingDefaultGroups = defaultAccountGroups
+    .filter((group) => !existingGroupCodes.has(group.code))
+    .map((group) => ({ code: group.code, name: group.name }));
+  const missingDefaultLedgers = defaultLedgerDefinitions
+    .filter((ledger) => !existingLedgerCodes.has(ledger.code))
+    .map((ledger) => ({ code: ledger.code, name: ledger.name, groupCode: ledger.groupCode }));
+  const missingDefaultVoucherTypes = defaultVoucherTypes
+    .filter((voucherType) => !existingVoucherTypeCodes.has(voucherType.code))
+    .map((voucherType) => ({ code: voucherType.code, name: voucherType.name }));
+
+  return {
+    missingDefaultGroups,
+    missingDefaultLedgers,
+    missingDefaultVoucherTypes,
+    missingDefaultGroupsCount: missingDefaultGroups.length,
+    missingDefaultLedgersCount: missingDefaultLedgers.length,
+    missingDefaultVoucherTypesCount: missingDefaultVoucherTypes.length,
+  };
+};
+
+export const restoreMissingDefaultLedgers = async (createdBy) => {
+  const { summary: groupsCreated, groupsByCode } = await initializeDefaultAccountGroups(createdBy);
+  const ledgersCreated = await initializeDefaultLedgers(groupsByCode, createdBy);
+  const settings = await initializeAccountingSettings();
+  const missing = await getDefaultAccountingMissingCounts();
+
+  return {
+    success: true,
+    message: "Missing default ledgers restored successfully",
+    data: {
+      groupsCreated,
+      ledgersCreated,
+      settings,
+      missing,
     },
   };
 };

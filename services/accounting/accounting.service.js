@@ -4,7 +4,10 @@ import FinancialYear from "../../models/accounting/FinancialYear.model.js";
 import Ledger from "../../models/accounting/Ledger.model.js";
 import Voucher from "../../models/accounting/Voucher.model.js";
 import VoucherType from "../../models/accounting/VoucherType.model.js";
-import { initializeAccountingFoundation } from "./seedAccounting.service.js";
+import {
+  getDefaultAccountingMissingCounts,
+  initializeAccountingFoundation,
+} from "./seedAccounting.service.js";
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
@@ -62,6 +65,7 @@ export const getAccountingStatus = async () => {
     voucherTypeCount,
     voucherCount,
     activeFinancialYear,
+    missingDefaults,
   ] = await Promise.all([
     AccountingSettings.findOne().lean(),
     AccountGroup.countDocuments(),
@@ -69,6 +73,7 @@ export const getAccountingStatus = async () => {
     VoucherType.countDocuments(),
     Voucher.countDocuments(),
     FinancialYear.findOne({ isActive: true, isClosed: false }).lean(),
+    getDefaultAccountingMissingCounts(),
   ]);
 
   const settingsConfigured = Boolean(settings);
@@ -87,6 +92,7 @@ export const getAccountingStatus = async () => {
     settingsConfigured,
     foundationReady,
     initialized: foundationReady,
+    ...missingDefaults,
     gstAccountingEnabled: Boolean(settings?.gstAccountingEnabled),
     inventoryAccountingEnabled: Boolean(settings?.inventoryAccountingEnabled),
     autoVoucherPosting: settings?.autoVoucherPosting ?? true,

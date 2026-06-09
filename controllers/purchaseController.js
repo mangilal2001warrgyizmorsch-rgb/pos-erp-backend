@@ -15,6 +15,7 @@ import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
 import { recordStockMovement } from '../utils/stockMovement.js';
 import { postPurchaseAccountingVoucher } from '../services/accounting/purchaseAccounting.service.js';
+import { ensureSupplierAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 
 export const createPurchase = async (req, res, next) => {
   const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
@@ -148,6 +149,8 @@ export const createPurchase = async (req, res, next) => {
 
     // Update supplier balance and statements if supplier exists
     if (supplier && confirmedReceipt) {
+      await ensureSupplierAccountingLedger(supplier, session, req.user._id);
+
       await Supplier.findByIdAndUpdate(
         supplier,
         {
@@ -613,6 +616,8 @@ export const updatePurchase = async (req, res, next) => {
     await purchase.save({ session });
 
     if (supplier && newConfirmedReceipt) {
+      await ensureSupplierAccountingLedger(supplier, session, req.user._id);
+
       await Supplier.findByIdAndUpdate(
         supplier,
         {

@@ -1,4 +1,5 @@
 import Customer from '../models/Customer.js';
+import { ensureCustomerAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 
 // @desc    Get all customers
 // @route   GET /api/customers
@@ -64,6 +65,7 @@ export const getCustomer = async (req, res, next) => {
 export const createCustomer = async (req, res, next) => {
   try {
     const customer = await Customer.create(req.body);
+    await ensureCustomerAccountingLedger(customer._id, null, req.user?._id);
     res.status(201).json({
       success: true,
       data: customer,

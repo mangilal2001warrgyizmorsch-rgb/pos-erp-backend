@@ -110,5 +110,7 @@ voucherSchema.pre("save", function validatePostedVoucherBalance(next) {
 voucherSchema.index({ voucherTypeCode: 1, date: -1 });
 voucherSchema.index({ status: 1, date: -1 });
 voucherSchema.index({ referenceModule: 1, referenceId: 1 });
+voucherSchema.index({ referenceModule: 1, referenceId: 1, voucherTypeCode: 1 });
+voucherSchema.index({ financialYearId: 1 });
 
 export default mongoose.model("Voucher", voucherSchema);

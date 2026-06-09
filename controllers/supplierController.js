@@ -1,4 +1,5 @@
 import Supplier from '../models/Supplier.js';
+import { ensureSupplierAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 
 // @desc    Get all suppliers
 // @route   GET /api/suppliers
@@ -80,6 +81,7 @@ export const getSupplier = async (req, res, next) => {
 export const createSupplier = async (req, res, next) => {
   try {
     const supplier = await Supplier.create(req.body);
+    await ensureSupplierAccountingLedger(supplier._id, null, req.user?._id);
     res.status(201).json({
       success: true,
       data: supplier,

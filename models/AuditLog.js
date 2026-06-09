@@ -13,7 +13,6 @@ const auditLogSchema = new mongoose.Schema(
     },
     action: {
       type: String,
-      enum: ['create', 'update', 'delete', 'login', 'logout', 'stock_adjust', 'sale', 'purchase', 'cancel'],
       required: true,
     },
     module: {
@@ -27,7 +26,23 @@ const auditLogSchema = new mongoose.Schema(
     details: {
       type: mongoose.Schema.Types.Mixed, // Can store before/after state
     },
+    referenceId: {
+      type: mongoose.Schema.Types.ObjectId,
+    },
+    referenceNo: {
+      type: String,
+      trim: true,
+    },
+    oldData: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    newData: {
+      type: mongoose.Schema.Types.Mixed,
+    },
     ipAddress: {
+      type: String,
+    },
+    userAgent: {
       type: String,
     },
   },
@@ -37,6 +52,8 @@ const auditLogSchema = new mongoose.Schema(
 );
 
 auditLogSchema.index({ module: 1, action: 1 });
+auditLogSchema.index({ action: 1 });
+auditLogSchema.index({ module: 1, createdAt: -1 });
 auditLogSchema.index({ user: 1, createdAt: -1 });
 auditLogSchema.index({ createdAt: -1 });
 

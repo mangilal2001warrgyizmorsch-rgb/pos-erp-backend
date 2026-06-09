@@ -22,6 +22,11 @@ const createDocument = async (Model, payload, session = null) => {
   return doc;
 };
 
+const normalizeSearchRegex = (value) => {
+  const escaped = String(value || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`, "i");
+};
+
 const ledgerByIdOrCode = async (ledgerId, code, ledgerType, session = null) => {
   const queries = [];
   if (ledgerId) queries.push({ _id: ledgerId });
@@ -119,33 +124,74 @@ export const getOrCreateCashBankLedger = async (accountInput, settings, session 
   }
 
   if (account.accountingLedgerId) {
-    const existing = await queryWithSession(Ledger.findById(account.accountingLedgerId), session);
-    if (existing?.isActive) return existing;
+    const existing = await ledgerByIdOrCode(account.accountingLedgerId, null, LEDGER_TYPES.BANK, session);
+    if (existing) return existing;
   }
 
   const group = await getGroup("BANK_ACCOUNTS", session);
   const code = `BANK-${shortId(account._id)}`;
-  let ledger = await queryWithSession(Ledger.findOne({ code }), session);
-  if (!ledger) {
-    ledger = await createDocument(Ledger, {
-      name: `${account.accountName} A/c`,
-      code,
-      groupId: group._id,
+  let ledger = await queryWithSession(Ledger.findOne({ code, isActive: true }), session);
+
+  if (!ledger && account.accountNumber) {
+    ledger = await queryWithSession(Ledger.findOne({ "bankDetails.accountNumber": account.accountNumber, ledgerType: LEDGER_TYPES.BANK, isActive: true }), session);
+  }
+
+  if (!ledger && account.ifscCode) {
+    ledger = await queryWithSession(Ledger.findOne({ "bankDetails.ifscCode": account.ifscCode, ledgerType: LEDGER_TYPES.BANK, isActive: true }), session);
+  }
+
+  if (!ledger && (account.bankName || account.accountName)) {
+    const searchValue = account.bankName || account.accountName;
+    const nameSearch = normalizeSearchRegex(searchValue);
+    ledger = await queryWithSession(Ledger.findOne({
       ledgerType: LEDGER_TYPES.BANK,
-      openingBalance: 0,
-      openingBalanceType: NORMAL_BALANCE.DEBIT,
-      currentBalance: 0,
-      currentBalanceType: NORMAL_BALANCE.DEBIT,
-      partyType: "none",
-      bankDetails: {
-        bankName: account.bankName,
-        accountNumber: account.accountNumber,
-        ifscCode: account.ifscCode,
-      },
-      isSystemDefault: false,
       isActive: true,
-      createdBy,
-    }, session);
+      $or: [
+        { name: nameSearch },
+        { "bankDetails.bankName": nameSearch },
+      ],
+    }), session);
+  }
+
+  if (!ledger) {
+    try {
+      ledger = await createDocument(Ledger, {
+        name: `${account.accountName} A/c`,
+        code,
+        groupId: group._id,
+        ledgerType: LEDGER_TYPES.BANK,
+        openingBalance: 0,
+        openingBalanceType: NORMAL_BALANCE.DEBIT,
+        currentBalance: 0,
+        currentBalanceType: NORMAL_BALANCE.DEBIT,
+        partyType: "none",
+        bankDetails: {
+          bankName: account.bankName,
+          accountNumber: account.accountNumber,
+          ifscCode: account.ifscCode,
+        },
+        isSystemDefault: false,
+        isActive: true,
+        createdBy,
+      }, session);
+    } catch (error) {
+      if (error?.code === 11000) {
+        ledger = await queryWithSession(Ledger.findOne({ code }), session);
+        if (ledger) {
+          if (!ledger.isActive) {
+            ledger.isActive = true;
+            ledger.bankDetails = {
+              ...ledger.bankDetails,
+              bankName: account.bankName || ledger.bankDetails?.bankName,
+              accountNumber: account.accountNumber || ledger.bankDetails?.accountNumber,
+              ifscCode: account.ifscCode || ledger.bankDetails?.ifscCode,
+            };
+            await ledger.save({ session, validateBeforeSave: false });
+          }
+        }
+      }
+      if (!ledger) throw error;
+    }
   }
 
   account.accountingLedgerId = ledger._id;
