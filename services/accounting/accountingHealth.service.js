@@ -17,6 +17,8 @@ import Supplier from "../../models/Supplier.js";
 import PartyLedger from "../../models/PartyLedger.js";
 import { getGSTSummary } from "./gstReports.service.js";
 import { ensureCustomerAccountingLedger, ensureSupplierAccountingLedger } from "./partyAccountingLedger.service.js";
+import { getOrCreateCashBankLedger } from "./cashBankAccounting.service.js";
+import { postVoucher } from "./voucher.service.js";
 
 const money = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const signedBalance = (amount, type) => (type === "CREDIT" ? -money(amount) : money(amount));
@@ -39,6 +41,8 @@ const issue = ({
   message,
   suggestedFix,
   suggestedApi,
+  actionType,
+  safeToAutoFix = false,
   details,
 }) => ({
   id: `${type}-${referenceId || voucherId || referenceNo || Math.random().toString(36).slice(2)}`,
@@ -51,6 +55,8 @@ const issue = ({
   message,
   suggestedFix,
   suggestedApi,
+  actionType,
+  safeToAutoFix,
   details,
 });
 
@@ -59,6 +65,187 @@ const getReferenceVoucher = async (referenceModule, referenceId) => Voucher.find
   referenceId,
   status: { $ne: "CANCELLED" },
 }).select("_id voucherNo status").lean();
+
+const getOpeningBalanceEquityLedger = async () => {
+  const ledger = await Ledger.findOne({ code: "OPENING_BALANCE_EQUITY", isActive: true });
+  if (!ledger) {
+    throw new Error("Opening Balance Equity A/c ledger is not configured. Run Initialize Accounting first.");
+  }
+  return ledger;
+};
+
+const addOpeningEntries = (entries, sourceLedger, equityLedger, signedAmount, narration, extra = {}) => {
+  const amount = Math.abs(money(signedAmount));
+  if (amount <= 0) return;
+  if (signedAmount >= 0) {
+    entries.push({ ledgerId: sourceLedger._id, debit: amount, credit: 0, narration, ...extra });
+    entries.push({ ledgerId: equityLedger._id, debit: 0, credit: amount, narration });
+  } else {
+    entries.push({ ledgerId: equityLedger._id, debit: amount, credit: 0, narration });
+    entries.push({ ledgerId: sourceLedger._id, debit: 0, credit: amount, narration, ...extra });
+  }
+};
+
+export const postOpeningBalanceVouchers = async ({ userId = null } = {}) => {
+  const equityLedger = await getOpeningBalanceEquityLedger();
+  const settings = await AccountingSettings.findOne();
+  const results = [];
+
+  const cashBankResult = await postCashBankOpeningBalanceVouchers({ userId, equityLedger, settings });
+  results.push(...cashBankResult.results);
+
+  const customers = await Customer.find({ isActive: true, openingBalance: { $ne: 0 } });
+  for (const customer of customers) {
+    const existing = await getReferenceVoucher("party_opening_balance", customer._id);
+    if (existing) {
+      results.push({ module: "customer", referenceId: customer._id, referenceNo: customer.name, action: "skipped", voucher: existing, message: "Opening balance voucher already exists." });
+      continue;
+    }
+
+    const ledger = await ensureCustomerAccountingLedger(customer._id, null, userId, { required: true });
+    const direction = String(customer.openingBalanceType || "Receivable").toLowerCase() === "payable" ? -1 : 1;
+    const signedAmount = money(customer.openingBalance) * direction;
+    const entries = [];
+    addOpeningEntries(entries, ledger, equityLedger, signedAmount, `Opening balance for ${customer.name}`, {
+      partyId: customer._id,
+      partyType: "customer",
+    });
+    if (entries.length) {
+      const posted = await postVoucher({
+        voucherTypeCode: "JOURNAL",
+        date: customer.openingBalanceDate || customer.createdAt || new Date(),
+        referenceModule: "party_opening_balance",
+        referenceId: customer._id,
+        referenceNo: customer.name,
+        narration: `Opening balance for customer ${customer.name}`,
+        entries,
+        createdBy: userId,
+      }, userId);
+      results.push({ module: "customer", referenceId: customer._id, referenceNo: customer.name, action: "posted", voucher: posted.voucher || posted });
+    }
+  }
+
+  const suppliers = await Supplier.find({ isActive: true, openingBalance: { $ne: 0 } });
+  for (const supplier of suppliers) {
+    const existing = await getReferenceVoucher("party_opening_balance", supplier._id);
+    if (existing) {
+      results.push({ module: "supplier", referenceId: supplier._id, referenceNo: supplier.name, action: "skipped", voucher: existing, message: "Opening balance voucher already exists." });
+      continue;
+    }
+
+    const ledger = await ensureSupplierAccountingLedger(supplier._id, null, userId, { required: true });
+    const direction = String(supplier.openingBalanceType || "Payable").toLowerCase() === "receivable" ? 1 : -1;
+    const signedAmount = money(supplier.openingBalance) * direction;
+    const entries = [];
+    addOpeningEntries(entries, ledger, equityLedger, signedAmount, `Opening balance for ${supplier.name}`, {
+      partyId: supplier._id,
+      partyType: "supplier",
+    });
+    if (entries.length) {
+      const posted = await postVoucher({
+        voucherTypeCode: "JOURNAL",
+        date: supplier.openingBalanceDate || supplier.createdAt || new Date(),
+        referenceModule: "party_opening_balance",
+        referenceId: supplier._id,
+        referenceNo: supplier.name,
+        narration: `Opening balance for supplier ${supplier.name}`,
+        entries,
+        createdBy: userId,
+      }, userId);
+      results.push({ module: "supplier", referenceId: supplier._id, referenceNo: supplier.name, action: "posted", voucher: posted.voucher || posted });
+    }
+  }
+
+  return {
+    postedAt: new Date(),
+    posted: results.filter((row) => row.action === "posted").length,
+    skipped: results.filter((row) => row.action === "skipped").length,
+    results,
+  };
+};
+
+export const postCashBankOpeningBalanceVouchers = async ({
+  accountId = null,
+  userId = null,
+  equityLedger = null,
+  settings = null,
+} = {}) => {
+  const openingEquityLedger = equityLedger || await getOpeningBalanceEquityLedger();
+  const accountingSettings = settings || await AccountingSettings.findOne();
+  const query = { status: "active", openingBalance: { $ne: 0 } };
+  if (accountId) query._id = accountId;
+
+  const accounts = await BankAccount.find(query);
+  const results = [];
+
+  for (const account of accounts) {
+    const existing = await getReferenceVoucher("cash_bank_opening_balance", account._id);
+    if (existing) {
+      if (!account.accountingOpeningPosted) {
+        account.accountingOpeningPosted = true;
+        await account.save({ validateBeforeSave: false });
+      }
+      results.push({
+        module: "cash_bank",
+        referenceId: account._id,
+        referenceNo: account.accountName,
+        action: "skipped",
+        voucher: existing,
+        message: "Opening balance voucher already exists.",
+      });
+      continue;
+    }
+
+    const ledger = await getOrCreateCashBankLedger(account, accountingSettings, null, userId);
+    const entries = [];
+    addOpeningEntries(
+      entries,
+      ledger,
+      openingEquityLedger,
+      money(account.openingBalance),
+      `Opening balance for ${account.accountName}`,
+    );
+
+    if (!entries.length) {
+      results.push({
+        module: "cash_bank",
+        referenceId: account._id,
+        referenceNo: account.accountName,
+        action: "skipped",
+        message: "Opening balance is zero.",
+      });
+      continue;
+    }
+
+    const posted = await postVoucher({
+      voucherTypeCode: "JOURNAL",
+      date: account.createdAt || new Date(),
+      referenceModule: "cash_bank_opening_balance",
+      referenceId: account._id,
+      referenceNo: account.accountName,
+      narration: `Opening balance for ${account.accountName}`,
+      entries,
+      createdBy: userId,
+    }, userId);
+
+    account.accountingOpeningPosted = true;
+    await account.save({ validateBeforeSave: false });
+    results.push({
+      module: "cash_bank",
+      referenceId: account._id,
+      referenceNo: account.accountName,
+      action: "posted",
+      voucher: posted.voucher || posted,
+    });
+  }
+
+  return {
+    postedAt: new Date(),
+    posted: results.filter((row) => row.action === "posted").length,
+    skipped: results.filter((row) => row.action === "skipped").length,
+    results,
+  };
+};
 
 const cashBankReferenceModule = (transaction) => {
   if (transaction.referenceModule === "bank_transfer" && transaction.referenceId) return "bank_transfer";
@@ -285,6 +472,8 @@ export const checkLedgerBalanceMismatch = async () => {
     message: `${row.ledgerName} stored balance does not match posted vouchers.`,
     suggestedFix: "Run ledger reconciliation fix after reviewing mismatches.",
     suggestedApi: "/api/accounting/reconciliation/ledgers/fix",
+    actionType: "RECALCULATE_LEDGER_BALANCE",
+    safeToAutoFix: true,
     details: row,
   }));
 };
@@ -320,6 +509,8 @@ export const checkMissingAccountingPostings = async () => {
         message: `${config.module.replaceAll("_", " ")} has no posted accounting voucher.`,
         suggestedFix: "Repost accounting for this document.",
         suggestedApi: config.repostApi(doc._id),
+        actionType: "REPOST_ACCOUNTING",
+        safeToAutoFix: true,
         details: {
           documentDate: config.date(doc),
           amount: money(config.amount(doc)),
@@ -344,6 +535,8 @@ export const checkCashBankMismatch = async () => {
       message: `${account.accountName} cash/bank balance differs from accounting ledger or transactions.`,
       suggestedFix: account.mappedLedger ? "Review cash/bank account mapping and transaction history." : "Link the cash/bank account to an accounting ledger.",
       suggestedApi: account.mappedLedger ? undefined : "/api/accounting/reconciliation/cash-bank/link-ledgers",
+      actionType: account.mappedLedger ? "REVIEW_ONLY" : "LINK_CASH_BANK_LEDGER",
+      safeToAutoFix: !account.mappedLedger,
       details: account,
     }));
 };
@@ -361,6 +554,8 @@ export const checkPartyLedgerMismatch = async () => {
       message: `${row.partyName} party balance differs between business, party ledger, and accounting ledger.`,
       suggestedFix: row.suggestedFix,
       suggestedApi: row.suggestedApi,
+      actionType: row.suggestedApi ? "LINK_PARTY_LEDGER" : "REVIEW_ONLY",
+      safeToAutoFix: Boolean(row.suggestedApi),
       details: row,
     }));
 };
@@ -374,6 +569,8 @@ export const checkGSTMismatch = async () => {
     referenceNo: row.ledgerCode,
     message: `${row.ledgerCode} report amount differs from accounting ledger.`,
     suggestedFix: "Review GST report documents and GST ledger postings.",
+    actionType: "FIX_GST_FIELD_MAPPING",
+    safeToAutoFix: false,
     details: row,
   }));
 };
@@ -575,6 +772,45 @@ export const linkCashBankAccountLedgers = async ({ userId = null } = {}) => {
   return { linkedAt: new Date(), results };
 };
 
+const isOpeningCashBankTransaction = (tx) => (
+  tx.type === "opening_cash"
+  || tx.referenceModule === "opening_cash_bank"
+  || tx.referenceModule === "cash_bank_opening_balance"
+);
+
+const getCashBankComparableBalance = (account, transactions) => {
+  const openingBalance = money(account.openingBalance);
+  const storedCurrentBalance = money(account.currentBalance);
+  const openingTxMovement = money(transactions
+    .filter(isOpeningCashBankTransaction)
+    .reduce((sum, tx) => sum + (tx.direction === "in" ? money(tx.amount) : -money(tx.amount)), 0));
+  const operatingMovement = money(transactions
+    .filter((tx) => !isOpeningCashBankTransaction(tx))
+    .reduce((sum, tx) => sum + (tx.direction === "in" ? money(tx.amount) : -money(tx.amount)), 0));
+  const rawTransactionNet = money(openingTxMovement + operatingMovement);
+  const hasOpeningTransaction = Math.abs(openingTxMovement) > 0.01;
+  const transactionBalance = openingBalance > 0
+    ? money(openingBalance + operatingMovement)
+    : money(rawTransactionNet);
+  const openingTreatment = hasOpeningTransaction && openingBalance > 0
+    ? "legacy_opening_transaction_excluded_from_transaction_balance"
+    : hasOpeningTransaction
+      ? "opening_transaction_used_as_opening_balance"
+      : "account_opening_balance_field_used";
+
+  return {
+    openingBalance,
+    storedCurrentBalance,
+    openingTxMovement,
+    operatingMovement,
+    transactionNet: rawTransactionNet,
+    transactionBalance,
+    calculatedCurrentBalance: transactionBalance,
+    hasOpeningTransaction,
+    openingTreatment,
+  };
+};
+
 export const getCashBankReconciliationDetails = async () => {
   const accounts = await BankAccount.find({ status: "active" })
     .populate("accountingLedgerId", "name code currentBalance currentBalanceType openingBalance openingBalanceType ledgerType groupId")
@@ -583,27 +819,29 @@ export const getCashBankReconciliationDetails = async () => {
 
   for (const account of accounts) {
     const txRows = await CashBankTransaction.find({ accountId: account._id, status: "completed" }).lean();
-    const transactionNet = txRows.reduce((sum, tx) => sum + (tx.direction === "in" ? money(tx.amount) : -money(tx.amount)), 0);
-    const transactionBalance = money(Number(account.openingBalance || 0) + transactionNet);
+    const comparable = getCashBankComparableBalance(account, txRows);
     const ledgerBalance = account.accountingLedgerId
       ? signedBalance(account.accountingLedgerId.currentBalance, account.accountingLedgerId.currentBalanceType)
       : null;
     const ledgerOpeningBalance = account.accountingLedgerId
       ? signedBalance(account.accountingLedgerId.openingBalance, account.accountingLedgerId.openingBalanceType)
       : null;
-    const currentBalance = money(account.currentBalance);
-    const difference = ledgerBalance === null ? currentBalance : money(currentBalance - ledgerBalance);
-    const transactionDifference = ledgerBalance === null ? null : money(transactionBalance - ledgerBalance);
-    const openingBalanceDifference = ledgerOpeningBalance === null ? null : money(Number(account.openingBalance || 0) - ledgerOpeningBalance);
+    const currentBalance = comparable.storedCurrentBalance;
+    const difference = ledgerBalance === null ? currentBalance : money(comparable.calculatedCurrentBalance - ledgerBalance);
+    const storedBalanceDifference = money(currentBalance - comparable.calculatedCurrentBalance);
+    const transactionDifference = ledgerBalance === null ? null : money(comparable.transactionBalance - ledgerBalance);
+    const openingBalanceDifference = ledgerOpeningBalance === null ? null : money(comparable.openingBalance - ledgerOpeningBalance);
     const status = !account.accountingLedgerId
       ? "missing_ledger"
-      : (isMismatch(currentBalance, ledgerBalance) || isMismatch(transactionBalance, ledgerBalance) ? "mismatch" : "ok");
+      : (isMismatch(comparable.calculatedCurrentBalance, ledgerBalance) || isMismatch(currentBalance, comparable.calculatedCurrentBalance) ? "mismatch" : "ok");
 
     let suggestedFix = "No action required.";
     if (!account.accountingLedgerId) {
       suggestedFix = "Run Link Cash/Bank Ledgers to map this account to an accounting ledger.";
-    } else if (openingBalanceDifference && Math.abs(openingBalanceDifference) > 0.01) {
-      suggestedFix = "Remaining difference appears related to opening balance. Review opening balance accounting, then run Recalculate Ledger Balances.";
+    } else if (Math.abs(storedBalanceDifference) > 0.01) {
+      suggestedFix = "Cash/bank stored current balance differs from opening plus non-opening transaction movement. Review cash/bank transaction history before recalculating ledgers.";
+    } else if (openingBalanceDifference && Math.abs(openingBalanceDifference) > 0.01 && Math.abs(difference) <= Math.abs(openingBalanceDifference) + 0.01) {
+      suggestedFix = "Remaining difference appears related to opening balance. Post cash/bank opening balances, then run Recalculate Ledger Balances.";
     } else if (status === "mismatch") {
       suggestedFix = "Run Recalculate Ledger Balances, then review missing cash/bank vouchers if the difference remains.";
     }
@@ -613,9 +851,15 @@ export const getCashBankReconciliationDetails = async () => {
       accountName: account.accountName,
       accountType: account.accountType,
       currentBalance,
-      openingBalance: money(account.openingBalance),
-      transactionNet: money(transactionNet),
-      transactionBalance,
+      openingBalance: comparable.openingBalance,
+      openingTxMovement: comparable.openingTxMovement,
+      operatingMovement: comparable.operatingMovement,
+      transactionNet: comparable.transactionNet,
+      transactionBalance: comparable.transactionBalance,
+      calculatedCurrentBalance: comparable.calculatedCurrentBalance,
+      storedBalanceDifference,
+      openingTreatment: comparable.openingTreatment,
+      hasOpeningTransaction: comparable.hasOpeningTransaction,
       mappedLedger: account.accountingLedgerId ? {
         ledgerId: account.accountingLedgerId._id,
         name: account.accountingLedgerId.name,
@@ -634,6 +878,43 @@ export const getCashBankReconciliationDetails = async () => {
     });
   }
 
+  const rowsByLedger = rows.reduce((acc, row) => {
+    const ledgerId = idString(row.mappedLedger?.ledgerId);
+    if (!ledgerId) return acc;
+    if (!acc.has(ledgerId)) acc.set(ledgerId, []);
+    acc.get(ledgerId).push(row);
+    return acc;
+  }, new Map());
+
+  for (const groupRows of rowsByLedger.values()) {
+    const ledgerType = groupRows[0]?.mappedLedger?.ledgerType;
+    if (ledgerType !== "CASH" || groupRows.length <= 1) continue;
+
+    const sharedStoredBalance = money(groupRows.reduce((sum, row) => sum + row.currentBalance, 0));
+    const sharedCalculatedBalance = money(groupRows.reduce((sum, row) => sum + row.calculatedCurrentBalance, 0));
+    const sharedLedgerBalance = groupRows[0].ledgerBalance;
+    const sharedDifference = sharedLedgerBalance === null ? sharedCalculatedBalance : money(sharedCalculatedBalance - sharedLedgerBalance);
+    const sharedStoredDifference = money(sharedStoredBalance - sharedCalculatedBalance);
+    const sharedStatus = sharedLedgerBalance === null
+      ? "missing_ledger"
+      : (isMismatch(sharedCalculatedBalance, sharedLedgerBalance) || isMismatch(sharedStoredBalance, sharedCalculatedBalance) ? "mismatch" : "ok");
+
+    for (const row of groupRows) {
+      row.sharedLedger = true;
+      row.sharedLedgerAccountCount = groupRows.length;
+      row.sharedLedgerStoredBalance = sharedStoredBalance;
+      row.sharedLedgerCalculatedBalance = sharedCalculatedBalance;
+      row.sharedLedgerDifference = sharedDifference;
+      row.sharedLedgerStoredDifference = sharedStoredDifference;
+      row.difference = sharedDifference;
+      row.transactionDifference = sharedDifference;
+      row.status = sharedStatus;
+      row.suggestedFix = sharedStatus === "ok"
+        ? "Cash ledger is shared; reconciliation is OK when cash accounts are compared in aggregate."
+        : "Cash ledger is shared by multiple cash accounts. Review aggregate cash movements, post missing opening balances, then run Recalculate Ledger Balances.";
+    }
+  }
+
   return { checkedAt: new Date(), accounts: rows };
 };
 
@@ -650,7 +931,9 @@ export const getPartyReconciliation = async () => {
   ]);
   const customerRows = [];
   for (const customer of customers) {
-    const ledger = await Ledger.findOne({ partyId: customer._id, partyType: "customer", isActive: true }).lean();
+    const ledger = customer.accountingLedgerId
+      ? await Ledger.findOne({ _id: customer.accountingLedgerId, isActive: true }).lean()
+      : await Ledger.findOne({ partyId: customer._id, partyType: "customer", isActive: true }).lean();
     const businessBalance = money(customer.walletBalance || customer.openingBalance || 0);
     const partyLedgerBalance = await latestPartyLedgerBalance(customer._id, "Customer");
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;
@@ -671,7 +954,9 @@ export const getPartyReconciliation = async () => {
   }
   const supplierRows = [];
   for (const supplier of suppliers) {
-    const ledger = await Ledger.findOne({ partyId: supplier._id, partyType: "supplier", isActive: true }).lean();
+    const ledger = supplier.accountingLedgerId
+      ? await Ledger.findOne({ _id: supplier.accountingLedgerId, isActive: true }).lean()
+      : await Ledger.findOne({ partyId: supplier._id, partyType: "supplier", isActive: true }).lean();
     const businessBalance = -money(supplier.outstandingBalance || supplier.openingBalance || 0);
     const partyLedgerBalance = await latestPartyLedgerBalance(supplier._id, "Supplier");
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;

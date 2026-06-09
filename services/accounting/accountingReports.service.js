@@ -192,6 +192,36 @@ const groupLedgerRows = (rows, amountForRow) => {
   }));
 };
 
+const excludedProfitLossLedgerTypes = new Set(["TAX", "CASH", "BANK", "CUSTOMER", "SUPPLIER", "STOCK"]);
+
+const profitLossDebugRows = (rows, includedRows, side) => {
+  const includedIds = new Set(includedRows.map((row) => String(row.ledgerId)));
+  return rows.map((row) => {
+    let reason = "Excluded because ledger group nature is not income or expense.";
+    if (excludedProfitLossLedgerTypes.has(row.ledgerType)) {
+      reason = `Excluded because ${row.ledgerType} ledgers are not part of Profit & Loss.`;
+    } else if (includedIds.has(String(row.ledgerId))) {
+      reason = `Included as ${side}.`;
+    } else if (row.nature === "INCOME" || row.nature === "EXPENSE") {
+      reason = "Excluded because net period movement is zero or contra-classified.";
+    }
+    return {
+      ledgerId: row.ledgerId,
+      ledgerName: row.ledgerName,
+      code: row.code,
+      ledgerType: row.ledgerType,
+      groupName: row.groupName,
+      nature: row.nature,
+      periodDebit: row.periodDebit,
+      periodCredit: row.periodCredit,
+      netAmount: roundMoney(row.periodCredit - row.periodDebit),
+      included: includedIds.has(String(row.ledgerId)),
+      side: includedIds.has(String(row.ledgerId)) ? side : null,
+      reason,
+    };
+  });
+};
+
 export const getTrialBalance = async (filters = {}) => {
   const { rows, period } = await getLedgerRows(filters);
   const visibleRows = rows.filter((row) => filters.hideZero === "true" ? hasActivity(row) : true);
@@ -216,15 +246,16 @@ export const getTrialBalance = async (filters = {}) => {
 
 export const getProfitAndLoss = async (filters = {}) => {
   const { rows, period } = await getLedgerRows(filters);
-  const incomeRows = rows.filter((row) => row.nature === "INCOME");
-  const expenseRows = rows.filter((row) => row.nature === "EXPENSE");
+  const plEligibleRows = rows.filter((row) => !excludedProfitLossLedgerTypes.has(row.ledgerType));
+  const incomeRows = plEligibleRows.filter((row) => row.nature === "INCOME" || row.ledgerType === "PURCHASE_RETURN");
+  const expenseRows = plEligibleRows.filter((row) => row.nature === "EXPENSE" && row.ledgerType !== "PURCHASE_RETURN");
   const income = groupLedgerRows(incomeRows, (row) => row.periodCredit - row.periodDebit);
   const expenses = groupLedgerRows(expenseRows, (row) => row.periodDebit - row.periodCredit);
   const totalIncome = roundMoney(income.reduce((total, group) => total + group.total, 0));
   const totalExpenses = roundMoney(expenses.reduce((total, group) => total + group.total, 0));
   const result = roundMoney(totalIncome - totalExpenses);
 
-  return {
+  const report = {
     reportName: "Profit & Loss",
     period: { startDate: period.startDate, endDate: period.endDate, financialYear: period.financialYear },
     income,
@@ -237,15 +268,33 @@ export const getProfitAndLoss = async (filters = {}) => {
       netLoss: result < 0 ? Math.abs(result) : 0,
     },
   };
+
+  if (String(filters.debug) === "true") {
+    report.debug = {
+      includedIncomeLedgers: profitLossDebugRows(rows, incomeRows, "income").filter((row) => row.included),
+      includedExpenseLedgers: profitLossDebugRows(rows, expenseRows, "expense").filter((row) => row.included),
+      allLedgers: [
+        ...profitLossDebugRows(rows, incomeRows, "income").filter((row) => row.included),
+        ...profitLossDebugRows(rows, expenseRows, "expense").filter((row) => row.included),
+        ...rows
+          .filter((row) => !incomeRows.some((incomeRow) => String(incomeRow.ledgerId) === String(row.ledgerId))
+            && !expenseRows.some((expenseRow) => String(expenseRow.ledgerId) === String(row.ledgerId)))
+          .map((row) => profitLossDebugRows([row], [], null)[0]),
+      ],
+    };
+  }
+
+  return report;
 };
 
 export const getBalanceSheet = async (filters = {}) => {
   const asOnDate = filters.asOnDate || filters.endDate || new Date().toISOString().slice(0, 10);
   const ledgerResult = await getLedgerRows({ ...filters, startDate: undefined, endDate: asOnDate, asOnDate });
-  const assetRows = ledgerResult.rows.filter((row) => row.nature === "ASSET");
-  const liabilityRows = ledgerResult.rows.filter((row) => row.nature === "LIABILITY");
-  const assets = groupLedgerRows(assetRows, (row) => row.closingDebit - row.closingCredit);
-  const liabilities = groupLedgerRows(liabilityRows, (row) => row.closingCredit - row.closingDebit);
+  const balanceSheetRows = ledgerResult.rows.filter((row) => row.nature === "ASSET" || row.nature === "LIABILITY");
+  const assetRows = balanceSheetRows.filter((row) => row.closingSigned > 0);
+  const liabilityRows = balanceSheetRows.filter((row) => row.closingSigned < 0);
+  const assets = groupLedgerRows(assetRows, (row) => row.closingSigned);
+  const liabilities = groupLedgerRows(liabilityRows, (row) => -row.closingSigned);
 
   const pl = await getProfitAndLoss({
     ...filters,
@@ -271,7 +320,7 @@ export const getBalanceSheet = async (filters = {}) => {
   const totalLiabilities = roundMoney(liabilities.reduce((total, group) => total + group.total, 0));
   const difference = roundMoney(totalAssets - totalLiabilities);
 
-  return {
+  const report = {
     reportName: "Balance Sheet",
     asOnDate: ledgerResult.period.endDate,
     assets,
@@ -279,6 +328,31 @@ export const getBalanceSheet = async (filters = {}) => {
     totals: { totalAssets, totalLiabilities, difference },
     isBalanced: Math.abs(difference) <= 0.009,
   };
+
+  if (String(filters.debug) === "true") {
+    const assetIds = new Set(assetRows.map((row) => String(row.ledgerId)));
+    const liabilityIds = new Set(liabilityRows.map((row) => String(row.ledgerId)));
+    report.debug = {
+      ledgers: ledgerResult.rows.map((row) => ({
+        ledgerId: row.ledgerId,
+        ledgerName: row.ledgerName,
+        code: row.code,
+        ledgerType: row.ledgerType,
+        groupName: row.groupName,
+        nature: row.nature,
+        closingBalance: row.closingBalance,
+        closingBalanceType: row.closingBalanceType,
+        includedUnder: assetIds.has(String(row.ledgerId)) ? "assets" : liabilityIds.has(String(row.ledgerId)) ? "liabilities" : null,
+        reason: assetIds.has(String(row.ledgerId))
+          ? "Included because group nature is ASSET."
+          : liabilityIds.has(String(row.ledgerId))
+            ? "Included because group nature is LIABILITY."
+            : "Excluded because Profit & Loss handles income/expense ledgers.",
+      })),
+    };
+  }
+
+  return report;
 };
 
 const getBook = async (filters = {}, ledgerType, names) => {

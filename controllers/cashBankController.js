@@ -323,22 +323,13 @@ export const createAccount = async (req, res) => {
 
     await newAccount.save();
 
-    // Create a transaction log for opening balance if greater than 0
-    if (Number(openingBalance) > 0) {
-      const openingTx = await createCashBankTransaction({
-        type: 'opening_cash',
-        direction: 'in',
-        amount: Number(openingBalance),
-        paymentMode: accountType === 'cash' ? 'Cash' : 'Bank',
-        accountType,
-        accountId: newAccount._id,
-        description: `Opening balance for ${accountName}`,
-        createdBy: req.user._id
-      });
-      await postCashBankTransactionVoucher(openingTx, { createdBy: req.user._id });
-    }
-
-    res.status(201).json({ success: true, data: newAccount, message: 'Account created successfully' });
+    res.status(201).json({
+      success: true,
+      data: newAccount,
+      message: Number(openingBalance) > 0
+        ? 'Account created successfully. Post opening balance from Accounting Settings.'
+        : 'Account created successfully',
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

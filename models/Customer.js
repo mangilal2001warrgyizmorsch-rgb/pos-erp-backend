@@ -77,10 +77,16 @@ const customerSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    accountingLedgerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ledger",
+    },
   },
   {
     timestamps: true,
   },
 );
+
+customerSchema.index({ accountingLedgerId: 1 });
 
 export default mongoose.model("Customer", customerSchema);

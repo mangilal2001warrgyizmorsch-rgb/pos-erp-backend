@@ -26,6 +26,9 @@ import {
   getPartyReconciliationController,
   linkCashBankLedgersController,
   linkPartyLedgersController,
+  postCashBankOpeningBalanceController,
+  postCashBankOpeningBalancesController,
+  postOpeningBalancesController,
   repostMissingAccountingBatchController,
   repostMissingAccountingController,
 } from "../controllers/accounting/accountingHealth.controller.js";
@@ -150,6 +153,9 @@ router.get("/reconciliation/cash-bank", getCashBankReconciliationController);
 router.get("/reconciliation/cash-bank/details", getCashBankReconciliationDetailsController);
 router.post("/reconciliation/cash-bank/link-ledgers", authorize("admin"), linkCashBankLedgersController);
 router.post("/reconciliation/parties/link-ledgers", authorize("admin"), linkPartyLedgersController);
+router.post("/opening-balances/post-all", authorize("admin"), postOpeningBalancesController);
+router.post("/opening-balances/cash-bank/post-all", authorize("admin"), postCashBankOpeningBalancesController);
+router.post("/opening-balances/cash-bank/:accountId/post", authorize("admin"), postCashBankOpeningBalanceController);
 router.get("/reconciliation/parties", getPartyReconciliationController);
 router.get("/reconciliation/gst", getGSTReconciliationController);
 

@@ -65,12 +65,18 @@ export const createPurchase = async (req, res, next) => {
       taxRate: taxRate || 0,
       taxAmount: taxAmount || 0,
       totalCgst: totalCgst || 0,
+      cgstAmount: totalCgst || 0,
       totalSgst: totalSgst || 0,
+      sgstAmount: totalSgst || 0,
       totalIgst: totalIgst || 0,
+      igstAmount: totalIgst || 0,
+      taxableAmount: Number(subtotal || 0) - Number(discountAmount || 0),
+      totalTax: taxAmount || 0,
       discountAmount: discountAmount || 0,
       shippingCharges: shippingCharges || 0,
       roundOff: roundOff || 0,
       totalAmount,
+      grandTotal: totalAmount,
       paymentMethod,
       paymentStatus: paymentStatus || 'paid',
       amountPaid: amountPaid ?? totalAmount,
@@ -101,6 +107,13 @@ export const createPurchase = async (req, res, next) => {
       finalItems.push({
         ...item,
         product: productId,
+        gstRate: item.gstRate || item.taxRate || 0,
+        taxableAmount: item.taxableAmount ?? (Number(item.purchasePrice || 0) * Number(item.quantity || 0)),
+        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
+        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
+        igstAmount: item.igstAmount ?? item.igst ?? 0,
+        taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
+        hsn: item.hsn || item.hsnCode,
       });
 
       if (confirmedReceipt) {
@@ -548,6 +561,13 @@ export const updatePurchase = async (req, res, next) => {
       finalItems.push({
         ...item,
         product: productId,
+        gstRate: item.gstRate || item.taxRate || 0,
+        taxableAmount: item.taxableAmount ?? (Number(item.purchasePrice || 0) * Number(item.quantity || 0)),
+        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
+        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
+        igstAmount: item.igstAmount ?? item.igst ?? 0,
+        taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
+        hsn: item.hsn || item.hsnCode,
       });
 
       if (newConfirmedReceipt) {
@@ -600,12 +620,18 @@ export const updatePurchase = async (req, res, next) => {
     purchase.taxRate = taxRate || 0;
     purchase.taxAmount = taxAmount || 0;
     purchase.totalCgst = totalCgst || 0;
+    purchase.cgstAmount = totalCgst || 0;
     purchase.totalSgst = totalSgst || 0;
+    purchase.sgstAmount = totalSgst || 0;
     purchase.totalIgst = totalIgst || 0;
+    purchase.igstAmount = totalIgst || 0;
+    purchase.taxableAmount = Number(subtotal || 0) - Number(discountAmount || 0);
+    purchase.totalTax = taxAmount || 0;
     purchase.discountAmount = discountAmount || 0;
     purchase.shippingCharges = shippingCharges || 0;
     purchase.roundOff = roundOff || 0;
     purchase.totalAmount = totalAmount;
+    purchase.grandTotal = totalAmount;
     purchase.paymentMethod = paymentMethod;
     purchase.paymentStatus = paymentStatus || 'paid';
     purchase.amountPaid = amountPaid ?? totalAmount;

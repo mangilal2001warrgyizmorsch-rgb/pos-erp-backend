@@ -6,6 +6,8 @@ import {
   getPartyReconciliation,
   linkCashBankAccountLedgers,
   linkPartyAccountingLedgers,
+  postCashBankOpeningBalanceVouchers,
+  postOpeningBalanceVouchers,
   recalculateLedgerBalancesFromVouchers,
   runAccountingHealthCheck,
 } from "../../services/accounting/accountingHealth.service.js";
@@ -131,6 +133,58 @@ export const linkPartyLedgersController = async (req, res) => {
       action: "PARTY_LEDGER_RECONCILIATION_FIXED",
       module: "accounting_reconciliation",
       description: "Party accounts linked to accounting ledgers",
+      newData: result,
+    });
+    res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+};
+
+export const postOpeningBalancesController = async (req, res) => {
+  try {
+    const result = await postOpeningBalanceVouchers({ userId: req.user?._id });
+    await createAuditLog({
+      req,
+      action: "OPENING_BALANCES_POSTED",
+      module: "accounting_opening_balances",
+      description: `Posted ${result.posted} opening balance voucher(s)`,
+      newData: result,
+    });
+    res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+};
+
+export const postCashBankOpeningBalancesController = async (req, res) => {
+  try {
+    const result = await postCashBankOpeningBalanceVouchers({ userId: req.user?._id });
+    await createAuditLog({
+      req,
+      action: "CASH_BANK_OPENING_BALANCES_POSTED",
+      module: "accounting_opening_balances",
+      description: `Posted ${result.posted} cash/bank opening balance voucher(s)`,
+      newData: result,
+    });
+    res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    errorResponse(res, error);
+  }
+};
+
+export const postCashBankOpeningBalanceController = async (req, res) => {
+  try {
+    const result = await postCashBankOpeningBalanceVouchers({
+      accountId: req.params.accountId,
+      userId: req.user?._id,
+    });
+    await createAuditLog({
+      req,
+      action: "CASH_BANK_OPENING_BALANCE_POSTED",
+      module: "accounting_opening_balances",
+      referenceId: req.params.accountId,
+      description: `Posted ${result.posted} cash/bank opening balance voucher(s) for one account`,
       newData: result,
     });
     res.status(200).json({ success: true, data: result });

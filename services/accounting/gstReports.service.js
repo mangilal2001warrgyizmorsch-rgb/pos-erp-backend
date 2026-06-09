@@ -11,6 +11,7 @@ import {
   addGSTBucket,
   calculateGSTSplit,
   detectInvoiceType,
+  extractGSTAmounts,
   makeEmptyGSTBucket,
   normalizeGSTIN,
   roundMoney,
@@ -53,41 +54,10 @@ const itemTaxable = (item) => {
   return roundMoney(Math.max(0, qty * price - Number(item.discountAmount || 0)));
 };
 
-const getItemTaxBucket = (items = []) => {
-  const cgst = roundMoney((items || []).reduce((sum, item) => sum + Number(item.cgst || 0), 0));
-  const sgst = roundMoney((items || []).reduce((sum, item) => sum + Number(item.sgst || 0), 0));
-  const igst = roundMoney((items || []).reduce((sum, item) => sum + Number(item.igst || 0), 0));
-  const hasItemSplit = cgst || sgst || igst;
-  const totalTax = hasItemSplit
-    ? roundMoney(cgst + sgst + igst)
-    : roundMoney((items || []).reduce((sum, item) => sum + Number(item.taxAmount || 0), 0));
-  return { cgst, sgst, igst, totalTax };
-};
-
-const docTaxBucket = (doc, totalField = "totalAmount") => {
-  const totalValue = roundMoney(Number(doc[totalField] || doc.grandTotal || 0));
-  const headerTax = {
-    cgst: roundMoney(Number(doc.totalCgst || 0)),
-    sgst: roundMoney(Number(doc.totalSgst || 0)),
-    igst: roundMoney(Number(doc.totalIgst || 0)),
-    totalTax: roundMoney(Number(doc.taxAmount || doc.totalTax || 0)),
-  };
-  const itemTax = getItemTaxBucket(doc.items || []);
-  const useHeaderTotals = headerTax.cgst || headerTax.sgst || headerTax.igst || headerTax.totalTax;
-  const selectedTax = useHeaderTotals ? headerTax : itemTax;
-
-  return {
-    taxableAmount: roundMoney(Number(doc.subtotal || 0) - Number(doc.discountAmount || doc.totalDiscount || 0)),
-    cgst: selectedTax.cgst,
-    sgst: selectedTax.sgst,
-    igst: selectedTax.igst,
-    totalTax: selectedTax.totalTax,
-    totalValue,
-    taxSource: useHeaderTotals ? "header" : "items",
-    headerTax,
-    itemTax,
-  };
-};
+const docTaxBucket = (doc) => extractGSTAmounts(doc, doc.items || [], {
+  stateOfSupply: doc.stateOfSupply,
+  partyStateCode: doc.customer?.stateCode || doc.supplier?.stateCode,
+});
 
 const splitReturnTax = (returnDoc) => {
   const totalTax = roundMoney(returnDoc.totalTax || returnDoc.items?.reduce((sum, item) => sum + Number(item.taxAmount || 0), 0));
@@ -128,7 +98,7 @@ export const getOutputGSTReport = async (filters = {}) => {
   const sales = await getSalesDocs(filters);
   const rows = sales.map((sale) => {
     const customerGSTIN = normalizeGSTIN(sale.customer?.gstNumber);
-    const bucket = docTaxBucket(sale, "totalAmount");
+    const bucket = docTaxBucket(sale);
     return {
       date: sale.createdAt,
       invoiceNo: sale.invoiceNumber,
@@ -158,7 +128,7 @@ export const getInputGSTReport = async (filters = {}) => {
   const purchases = await getPurchaseDocs(filters);
   const rows = purchases.map((purchase) => {
     const supplierGSTIN = normalizeGSTIN(purchase.supplier?.gstNumber);
-    const bucket = docTaxBucket(purchase, "totalAmount");
+    const bucket = docTaxBucket(purchase);
     return {
       date: purchase.purchaseDate,
       billNo: purchase.purchaseNumber,
@@ -269,7 +239,7 @@ export const getGSTDebugReport = async (filters = {}) => {
   const settings = await getGSTSettings();
   const [sales, purchases] = await Promise.all([getSalesDocs(filters), getPurchaseDocs(filters)]);
   const referenceQuery = [];
-  if (sales.length) referenceQuery.push({ referenceModule: "sale", referenceId: { $in: sales.map((doc) => doc._id) } });
+  if (sales.length) referenceQuery.push({ referenceModule: "sale_invoice", referenceId: { $in: sales.map((doc) => doc._id) } });
   if (purchases.length) referenceQuery.push({ referenceModule: "purchase", referenceId: { $in: purchases.map((doc) => doc._id) } });
   const vouchers = referenceQuery.length
     ? await Voucher.find({ status: "POSTED", $or: referenceQuery }).lean()
@@ -278,12 +248,13 @@ export const getGSTDebugReport = async (filters = {}) => {
   const { postingsByVoucher, ledgerByCode } = await buildGSTVoucherPostings(vouchers);
 
   const buildRows = (docs, docType) => docs.map((doc) => {
-    const bucket = docTaxBucket(doc, "totalAmount");
+    const bucket = docTaxBucket(doc);
     const partyName = docType === "sale"
       ? doc.customerName || doc.customer?.name || "Walk-in Customer"
       : doc.supplierName || doc.supplier?.name || "Supplier";
     const gstin = normalizeGSTIN(docType === "sale" ? doc.customer?.gstNumber : doc.supplier?.gstNumber);
-    const voucher = voucherByReference.get(`${docType}:${String(doc._id)}`) || null;
+    const referenceModule = docType === "sale" ? "sale_invoice" : "purchase";
+    const voucher = voucherByReference.get(`${referenceModule}:${String(doc._id)}`) || null;
     const voucherPostings = voucher ? postingsByVoucher.get(String(voucher._id)) || new Map() : new Map();
     const postingRows = gstLedgerCodes.map((code) => {
       const ledger = ledgerByCode.get(code);
@@ -324,6 +295,11 @@ export const getGSTDebugReport = async (filters = {}) => {
         igst: bucket.igst,
         totalTax: bucket.totalTax,
       },
+      extractedTaxableAmount: bucket.taxableAmount,
+      extractedCGST: bucket.cgst,
+      extractedSGST: bucket.sgst,
+      extractedIGST: bucket.igst,
+      missingFields: bucket.missingFields,
       totalValue: bucket.totalValue,
       voucherId: voucher?._id || null,
       voucherNo: voucher?.voucherNo || null,
@@ -337,16 +313,55 @@ export const getGSTDebugReport = async (filters = {}) => {
     ...buildRows(sales, "sale"),
     ...buildRows(purchases, "purchase"),
   ];
+  const outputGST = rows
+    .filter((row) => row.docType === "sale")
+    .reduce((acc, row) => addGSTBucket(acc, {
+      taxableAmount: row.extractedTaxableAmount,
+      cgst: row.extractedCGST,
+      sgst: row.extractedSGST,
+      igst: row.extractedIGST,
+      totalTax: row.selectedTax.totalTax,
+      totalValue: row.totalValue,
+    }), makeEmptyGSTBucket());
+  const inputGST = rows
+    .filter((row) => row.docType === "purchase")
+    .reduce((acc, row) => addGSTBucket(acc, {
+      taxableAmount: row.extractedTaxableAmount,
+      cgst: row.extractedCGST,
+      sgst: row.extractedSGST,
+      igst: row.extractedIGST,
+      totalTax: row.selectedTax.totalTax,
+      totalValue: row.totalValue,
+    }), makeEmptyGSTBucket());
+  const mismatches = rows
+    .filter((row) => row.status !== "ok" || row.missingFields.length > 0)
+    .map((row) => ({
+      docType: row.docType,
+      docId: row.docId,
+      docNo: row.docNo,
+      partyName: row.partyName,
+      status: row.status,
+      missingFields: row.missingFields,
+      gstPostings: row.gstPostings.filter((posting) => posting.status !== "ok"),
+      suggestedFix: row.status === "missing_voucher"
+        ? "Post or repost accounting voucher for this document."
+        : row.missingFields.length
+          ? "Review GST source fields, tax split, and state of supply."
+          : "Review GST ledger postings against extracted GST amounts.",
+    }));
 
   return {
     reportName: "GST Debug Report",
     period: getPeriod(filters),
     ...settings,
+    outputGST,
+    inputGST,
     rows,
+    mismatches,
     totals: {
       sales: sales.length,
       purchases: purchases.length,
-      mismatches: rows.filter((row) => row.status !== "ok").length,
+      mismatches: mismatches.length,
     },
   };
 };
@@ -405,12 +420,13 @@ export const getHSNSummary = async (filters = {}) => {
       }
       const row = grouped.get(key);
       const taxable = itemTaxable(item);
+      const bucket = extractGSTAmounts({}, [item]);
       row.quantity = roundMoney(row.quantity + Number(item.quantity || 0));
       row.taxableValue = roundMoney(row.taxableValue + taxable);
-      row.cgst = roundMoney(row.cgst + Number(item.cgst || 0));
-      row.sgst = roundMoney(row.sgst + Number(item.sgst || 0));
-      row.igst = roundMoney(row.igst + Number(item.igst || 0));
-      row.totalTax = roundMoney(row.totalTax + Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || item.taxAmount || 0));
+      row.cgst = roundMoney(row.cgst + bucket.cgst);
+      row.sgst = roundMoney(row.sgst + bucket.sgst);
+      row.igst = roundMoney(row.igst + bucket.igst);
+      row.totalTax = roundMoney(row.totalTax + bucket.totalTax);
       row.totalValue = roundMoney(row.totalValue + Number(item.total || taxable));
     }));
   };
@@ -499,7 +515,7 @@ export const getGSTPartyWiseReport = async (filters = {}) => {
       partyType: "customer",
       partyName: sale.customerName || sale.customer?.name || "Walk-in Customer",
       gstin: normalizeGSTIN(sale.customer?.gstNumber),
-      ...docTaxBucket(sale, "totalAmount"),
+      ...docTaxBucket(sale),
     }));
   }
   if (partyType !== "customer") {
@@ -507,7 +523,7 @@ export const getGSTPartyWiseReport = async (filters = {}) => {
       partyType: "supplier",
       partyName: purchase.supplierName || purchase.supplier?.name || "Supplier",
       gstin: normalizeGSTIN(purchase.supplier?.gstNumber),
-      ...docTaxBucket(purchase, "totalAmount"),
+      ...docTaxBucket(purchase),
     }));
   }
   return { reportName: "GST Party-wise Report", period: getPeriod(filters), ...settings, rows };

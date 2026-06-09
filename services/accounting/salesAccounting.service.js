@@ -10,6 +10,8 @@ import {
   PARTY_TYPES,
 } from "../../constants/accounting.constants.js";
 import { postVoucher } from "./voucher.service.js";
+import { extractGSTAmounts } from "../../utils/gst.utils.js";
+import { getOrCreateCashBankLedger } from "./cashBankAccounting.service.js";
 
 const SALE_REFERENCE_MODULE = "sale_invoice";
 
@@ -18,6 +20,11 @@ const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) *
 const money = (value) => roundMoney(Math.max(0, Number(value || 0)));
 
 const shortId = (id) => String(id || "").slice(-8).toUpperCase();
+
+const normalizeLedgerName = (value) => String(value || "")
+  .toLowerCase()
+  .replace(/\ba\/?c\b/g, "")
+  .replace(/[^a-z0-9]/g, "");
 
 const queryWithSession = (query, session = null) => {
   if (session) query.session(session);
@@ -83,7 +90,17 @@ export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy =
     throw new Error("Credit or partial sales require a customer for accounting posting.");
   }
 
-  const existingLedger = await queryWithSession(
+  const customer = await queryWithSession(Customer.findById(customerId), session);
+  if (!customer) {
+    throw new Error("Customer not found for accounting posting.");
+  }
+
+  const linkedLedger = customer.accountingLedgerId
+    ? await queryWithSession(Ledger.findOne({ _id: customer.accountingLedgerId, isActive: true }), session)
+    : null;
+  if (linkedLedger) return linkedLedger;
+
+  let existingLedger = await queryWithSession(
     Ledger.findOne({
       partyId: customerId,
       partyType: PARTY_TYPES.CUSTOMER,
@@ -91,11 +108,36 @@ export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy =
     }),
     session,
   );
-  if (existingLedger) return existingLedger;
-
-  const customer = await queryWithSession(Customer.findById(customerId), session);
-  if (!customer) {
-    throw new Error("Customer not found for accounting posting.");
+  if (!existingLedger) {
+    const candidates = await queryWithSession(
+      Ledger.find({
+        isActive: true,
+        $or: [
+          { ledgerType: LEDGER_TYPES.CUSTOMER },
+          { partyType: PARTY_TYPES.CUSTOMER },
+          { code: /^CUST-/ },
+        ],
+      }),
+      session,
+    );
+    const targetName = normalizeLedgerName(`${customer.name} A/c`);
+    existingLedger = candidates.find((ledger) => normalizeLedgerName(ledger.name) === targetName) || null;
+  }
+  if (existingLedger) {
+    existingLedger.partyId = customer._id;
+    existingLedger.partyType = PARTY_TYPES.CUSTOMER;
+    existingLedger.ledgerType = LEDGER_TYPES.CUSTOMER;
+    if (!existingLedger.gstDetails?.gstin && customer.gstNumber) {
+      existingLedger.gstDetails = {
+        ...existingLedger.gstDetails,
+        gstin: customer.gstNumber,
+        registrationType: customer.gstType,
+      };
+    }
+    await existingLedger.save({ session, validateBeforeSave: false });
+    customer.accountingLedgerId = existingLedger._id;
+    await customer.save({ session, validateBeforeSave: false });
+    return existingLedger;
   }
 
   const debtorGroup = await queryWithSession(
@@ -107,7 +149,7 @@ export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy =
   }
 
   try {
-    return await createLedgerDocument({
+    const ledger = await createLedgerDocument({
       name: `${customer.name} A/c`,
       code: `CUST-${shortId(customer._id)}`,
       groupId: debtorGroup._id,
@@ -125,6 +167,9 @@ export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy =
       isActive: true,
       createdBy,
     }, session);
+    customer.accountingLedgerId = ledger._id;
+    await customer.save({ session, validateBeforeSave: false });
+    return ledger;
   } catch (error) {
     if (error?.code === 11000) {
       const ledger = await queryWithSession(
@@ -135,7 +180,11 @@ export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy =
         }),
         session,
       );
-      if (ledger) return ledger;
+      if (ledger) {
+        customer.accountingLedgerId = ledger._id;
+        await customer.save({ session, validateBeforeSave: false });
+        return ledger;
+      }
     }
     throw error;
   }
@@ -192,8 +241,11 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
 
   const netPaid = Math.min(money(Number(sale.amountPaid || 0) - Number(sale.changeAmount || 0)), grandTotal);
   const creditAmount = money(grandTotal - netPaid);
-  const taxSplitTotal = money(sale.totalCgst) + money(sale.totalSgst) + money(sale.totalIgst);
-  const taxTotal = money(taxSplitTotal || sale.taxAmount);
+  const taxBucket = extractGSTAmounts(sale, sale.items || [], {
+    stateOfSupply: sale.stateOfSupply,
+  });
+  const taxSplitTotal = money(taxBucket.cgst) + money(taxBucket.sgst) + money(taxBucket.igst);
+  const taxTotal = money(taxSplitTotal || taxBucket.totalTax || sale.taxAmount);
   const discountAmount = money(sale.discountAmount);
 
   const salesLedger = await requireLedger(
@@ -202,8 +254,6 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
     "SALES",
     LEDGER_TYPES.SALES,
   );
-  const cashLedger = await requireLedger("Cash", settings.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH);
-  const bankLedger = await requireLedger("Bank", settings.defaultBankLedgerId, "PRIMARY_BANK", LEDGER_TYPES.BANK);
   const discountLedger = discountAmount > 0
     ? await ledgerByIdOrCode(settings.defaultDiscountGivenLedgerId, "DISCOUNT_GIVEN", LEDGER_TYPES.DISCOUNT)
     : null;
@@ -221,7 +271,9 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
   const narration = `Sales invoice ${sale.invoiceNumber}`;
 
   if (netPaid > 0) {
-    const receiptLedger = sale.paymentMethod === "cash" ? cashLedger : bankLedger;
+    const receiptLedger = sale.paymentMethod === "cash"
+      ? await getOrCreateCashBankLedger(null, settings, null, createdBy)
+      : await getOrCreateCashBankLedger(sale.cashBankAccountId, settings, null, createdBy);
     addEntry(entries, receiptLedger, netPaid, 0, `${narration} - payment received`);
   }
 
@@ -246,9 +298,9 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
     };
 
     if (taxSplitTotal > 0) {
-      addEntry(entries, taxLedgers.cgst, 0, money(sale.totalCgst), `${narration} - output CGST`);
-      addEntry(entries, taxLedgers.sgst, 0, money(sale.totalSgst), `${narration} - output SGST`);
-      addEntry(entries, taxLedgers.igst, 0, money(sale.totalIgst), `${narration} - output IGST`);
+      addEntry(entries, taxLedgers.cgst, 0, money(taxBucket.cgst), `${narration} - output CGST`);
+      addEntry(entries, taxLedgers.sgst, 0, money(taxBucket.sgst), `${narration} - output SGST`);
+      addEntry(entries, taxLedgers.igst, 0, money(taxBucket.igst), `${narration} - output IGST`);
     } else {
       const fallbackTaxLedger = taxLedgers.igst || taxLedgers.cgst || taxLedgers.sgst;
       if (!fallbackTaxLedger) {

@@ -8,6 +8,7 @@ import PaymentIn from "../../models/PaymentIn.js";
 import PaymentOut from "../../models/PaymentOut.js";
 import { postVoucher } from "./voucher.service.js";
 import { LEDGER_TYPES, NORMAL_BALANCE, PARTY_TYPES } from "../../constants/accounting.constants.js";
+import { getOrCreateCashBankLedger } from "./cashBankAccounting.service.js";
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const money = (value) => roundMoney(Math.max(0, Number(value || 0)));
@@ -49,20 +50,35 @@ const requireLedger = async (label, ledgerId, code, ledgerType, session = null) 
 
 const shortId = (id) => String(id || "").slice(-8).toUpperCase();
 
+const createLedgerDocument = async (payload, session = null) => {
+  if (!session) return Ledger.create(payload);
+  const [ledger] = await Ledger.create([payload], { session });
+  return ledger;
+};
+
 const getOrCreateCustomerLedger = async (customerId, session = null, createdBy = null) => {
   if (!customerId) throw new Error("Payment-In requires a customer ledger for accounting posting.");
 
-  const existingLedger = await queryWithSession(Ledger.findOne({ partyId: customerId, partyType: PARTY_TYPES.CUSTOMER, ledgerType: LEDGER_TYPES.CUSTOMER, isActive: true }), session);
-  if (existingLedger) return existingLedger;
-
   const customer = await queryWithSession(Customer.findById(customerId), session);
   if (!customer) throw new Error("Customer not found for accounting posting.");
+
+  const linkedLedger = customer.accountingLedgerId
+    ? await queryWithSession(Ledger.findOne({ _id: customer.accountingLedgerId, isActive: true }), session)
+    : null;
+  if (linkedLedger) return linkedLedger;
+
+  const existingLedger = await queryWithSession(Ledger.findOne({ partyId: customerId, partyType: PARTY_TYPES.CUSTOMER, ledgerType: LEDGER_TYPES.CUSTOMER, isActive: true }), session);
+  if (existingLedger) {
+    customer.accountingLedgerId = existingLedger._id;
+    await customer.save({ session, validateBeforeSave: false });
+    return existingLedger;
+  }
 
   const debtorGroup = await queryWithSession(AccountGroup.findOne({ code: "SUNDRY_DEBTORS", isActive: true }), session);
   if (!debtorGroup) throw new Error("Sundry Debtors account group is not configured.");
 
   try {
-    return await Ledger.create([{
+    const ledger = await createLedgerDocument({
       name: `${customer.name} A/c`,
       code: `CUST-${shortId(customer._id)}`,
       groupId: debtorGroup._id,
@@ -79,11 +95,18 @@ const getOrCreateCustomerLedger = async (customerId, session = null, createdBy =
       },
       isActive: true,
       createdBy,
-    }], { session });
+    }, session);
+    customer.accountingLedgerId = ledger._id;
+    await customer.save({ session, validateBeforeSave: false });
+    return ledger;
   } catch (error) {
     if (error?.code === 11000) {
       const ledger = await queryWithSession(Ledger.findOne({ partyId: customerId, partyType: PARTY_TYPES.CUSTOMER, ledgerType: LEDGER_TYPES.CUSTOMER, isActive: true }), session);
-      if (ledger) return ledger;
+      if (ledger) {
+        customer.accountingLedgerId = ledger._id;
+        await customer.save({ session, validateBeforeSave: false });
+        return ledger;
+      }
     }
     throw error;
   }
@@ -92,17 +115,26 @@ const getOrCreateCustomerLedger = async (customerId, session = null, createdBy =
 const getOrCreateSupplierLedger = async (supplierId, session = null, createdBy = null) => {
   if (!supplierId) throw new Error("Payment-Out requires a supplier ledger for accounting posting.");
 
-  const existingLedger = await queryWithSession(Ledger.findOne({ partyId: supplierId, partyType: PARTY_TYPES.SUPPLIER, ledgerType: LEDGER_TYPES.SUPPLIER, isActive: true }), session);
-  if (existingLedger) return existingLedger;
-
   const supplier = await queryWithSession(Supplier.findById(supplierId), session);
   if (!supplier) throw new Error("Supplier not found for accounting posting.");
+
+  const linkedLedger = supplier.accountingLedgerId
+    ? await queryWithSession(Ledger.findOne({ _id: supplier.accountingLedgerId, isActive: true }), session)
+    : null;
+  if (linkedLedger) return linkedLedger;
+
+  const existingLedger = await queryWithSession(Ledger.findOne({ partyId: supplierId, partyType: PARTY_TYPES.SUPPLIER, ledgerType: LEDGER_TYPES.SUPPLIER, isActive: true }), session);
+  if (existingLedger) {
+    supplier.accountingLedgerId = existingLedger._id;
+    await supplier.save({ session, validateBeforeSave: false });
+    return existingLedger;
+  }
 
   const creditorGroup = await queryWithSession(AccountGroup.findOne({ code: "SUNDRY_CREDITORS", isActive: true }), session);
   if (!creditorGroup) throw new Error("Sundry Creditors account group is not configured.");
 
   try {
-    return await Ledger.create([{
+    const ledger = await createLedgerDocument({
       name: `${supplier.name} A/c`,
       code: `SUPPLIER-${shortId(supplier._id)}`,
       groupId: creditorGroup._id,
@@ -119,11 +151,18 @@ const getOrCreateSupplierLedger = async (supplierId, session = null, createdBy =
       },
       isActive: true,
       createdBy,
-    }], { session });
+    }, session);
+    supplier.accountingLedgerId = ledger._id;
+    await supplier.save({ session, validateBeforeSave: false });
+    return ledger;
   } catch (error) {
     if (error?.code === 11000) {
       const ledger = await queryWithSession(Ledger.findOne({ partyId: supplierId, partyType: PARTY_TYPES.SUPPLIER, ledgerType: LEDGER_TYPES.SUPPLIER, isActive: true }), session);
-      if (ledger) return ledger;
+      if (ledger) {
+        supplier.accountingLedgerId = ledger._id;
+        await supplier.save({ session, validateBeforeSave: false });
+        return ledger;
+      }
     }
     throw error;
   }
@@ -186,9 +225,9 @@ export const postPaymentInAccountingVoucher = async (
   }
 
   const customerLedger = await getOrCreateCustomerLedger(payment.partyId, session, createdBy);
-  const cashLedger = await requireLedger("Cash", settings.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH, session);
-  const bankLedger = await requireLedger("Bank", settings.defaultBankLedgerId, "PRIMARY_BANK", LEDGER_TYPES.BANK, session);
-  const paymentLedger = isCashMode(payment.paymentMode) ? cashLedger : bankLedger;
+  const paymentLedger = isCashMode(payment.paymentMode)
+    ? await getOrCreateCashBankLedger(null, settings, session, createdBy)
+    : await getOrCreateCashBankLedger(payment.cashBankAccountId, settings, session, createdBy);
 
   const receiptLabel = payment.receiptNo || String(payment._id).slice(-8).toUpperCase();
   const paymentNarration = `Receipt ${receiptLabel}`;
@@ -262,9 +301,9 @@ export const postPaymentOutAccountingVoucher = async (
   }
 
   const supplierLedger = await getOrCreateSupplierLedger(payment.partyId, session, createdBy);
-  const cashLedger = await requireLedger("Cash", settings.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH, session);
-  const bankLedger = await requireLedger("Bank", settings.defaultBankLedgerId, "PRIMARY_BANK", LEDGER_TYPES.BANK, session);
-  const paymentLedger = isCashMode(payment.paymentMode) ? cashLedger : bankLedger;
+  const paymentLedger = isCashMode(payment.paymentMode)
+    ? await getOrCreateCashBankLedger(null, settings, session, createdBy)
+    : await getOrCreateCashBankLedger(payment.cashBankAccountId, settings, session, createdBy);
 
   const receiptLabel = payment.receiptNo || String(payment._id).slice(-8).toUpperCase();
   const paymentNarration = `Payment ${receiptLabel}`;

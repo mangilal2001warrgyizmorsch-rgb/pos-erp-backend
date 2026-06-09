@@ -10,6 +10,8 @@ import {
   PARTY_TYPES,
 } from "../../constants/accounting.constants.js";
 import { postVoucher } from "./voucher.service.js";
+import { extractGSTAmounts } from "../../utils/gst.utils.js";
+import { getOrCreateCashBankLedger } from "./cashBankAccounting.service.js";
 
 const PURCHASE_REFERENCE_MODULE = "purchase";
 
@@ -18,6 +20,11 @@ const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) *
 const money = (value) => roundMoney(Math.max(0, Number(value || 0)));
 
 const shortId = (id) => String(id || "").slice(-8).toUpperCase();
+
+const normalizeLedgerName = (value) => String(value || "")
+  .toLowerCase()
+  .replace(/\ba\/?c\b/g, "")
+  .replace(/[^a-z0-9]/g, "");
 
 const queryWithSession = (query, session = null) => {
   if (session) query.session(session);
@@ -84,7 +91,17 @@ export const getOrCreateSupplierLedger = async (supplierId, session = null, crea
     throw new Error("Credit or partial purchases require a supplier for accounting posting.");
   }
 
-  const existingLedger = await queryWithSession(
+  const supplier = await queryWithSession(Supplier.findById(supplierId), session);
+  if (!supplier) {
+    throw new Error("Supplier not found for accounting posting.");
+  }
+
+  const linkedLedger = supplier.accountingLedgerId
+    ? await queryWithSession(Ledger.findOne({ _id: supplier.accountingLedgerId, isActive: true }), session)
+    : null;
+  if (linkedLedger) return linkedLedger;
+
+  let existingLedger = await queryWithSession(
     Ledger.findOne({
       partyId: supplierId,
       partyType: PARTY_TYPES.SUPPLIER,
@@ -93,11 +110,36 @@ export const getOrCreateSupplierLedger = async (supplierId, session = null, crea
     }),
     session,
   );
-  if (existingLedger) return existingLedger;
-
-  const supplier = await queryWithSession(Supplier.findById(supplierId), session);
-  if (!supplier) {
-    throw new Error("Supplier not found for accounting posting.");
+  if (!existingLedger) {
+    const candidates = await queryWithSession(
+      Ledger.find({
+        isActive: true,
+        $or: [
+          { ledgerType: LEDGER_TYPES.SUPPLIER },
+          { partyType: PARTY_TYPES.SUPPLIER },
+          { code: /^SUPPLIER-/ },
+        ],
+      }),
+      session,
+    );
+    const targetName = normalizeLedgerName(`${supplier.name} A/c`);
+    existingLedger = candidates.find((ledger) => normalizeLedgerName(ledger.name) === targetName) || null;
+  }
+  if (existingLedger) {
+    existingLedger.partyId = supplier._id;
+    existingLedger.partyType = PARTY_TYPES.SUPPLIER;
+    existingLedger.ledgerType = LEDGER_TYPES.SUPPLIER;
+    if (!existingLedger.gstDetails?.gstin && supplier.gstNumber) {
+      existingLedger.gstDetails = {
+        ...existingLedger.gstDetails,
+        gstin: supplier.gstNumber,
+        registrationType: supplier.gstType,
+      };
+    }
+    await existingLedger.save({ session, validateBeforeSave: false });
+    supplier.accountingLedgerId = existingLedger._id;
+    await supplier.save({ session, validateBeforeSave: false });
+    return existingLedger;
   }
 
   const creditorGroup = await queryWithSession(
@@ -109,7 +151,7 @@ export const getOrCreateSupplierLedger = async (supplierId, session = null, crea
   }
 
   try {
-    return await createLedgerDocument({
+    const ledger = await createLedgerDocument({
       name: `${supplier.name} A/c`,
       code: `SUPPLIER-${shortId(supplier._id)}`,
       groupId: creditorGroup._id,
@@ -128,6 +170,9 @@ export const getOrCreateSupplierLedger = async (supplierId, session = null, crea
       isActive: true,
       createdBy,
     }, session);
+    supplier.accountingLedgerId = ledger._id;
+    await supplier.save({ session, validateBeforeSave: false });
+    return ledger;
   } catch (error) {
     if (error?.code === 11000) {
       const ledger = await queryWithSession(
@@ -139,7 +184,11 @@ export const getOrCreateSupplierLedger = async (supplierId, session = null, crea
         }),
         session,
       );
-      if (ledger) return ledger;
+      if (ledger) {
+        supplier.accountingLedgerId = ledger._id;
+        await supplier.save({ session, validateBeforeSave: false });
+        return ledger;
+      }
     }
     throw error;
   }
@@ -217,8 +266,12 @@ export const postPurchaseAccountingVoucher = async (
     throw new Error("Purchase total must be greater than zero for accounting posting.");
   }
 
-  const taxSplitTotal = money(purchase.totalCgst) + money(purchase.totalSgst) + money(purchase.totalIgst);
-  const taxTotal = money(taxSplitTotal || purchase.taxAmount);
+  const taxBucket = extractGSTAmounts(purchase, purchase.items || [], {
+    stateOfSupply: purchase.stateOfSupply,
+    partyStateCode: purchase.supplier?.stateCode,
+  });
+  const taxSplitTotal = money(taxBucket.cgst) + money(taxBucket.sgst) + money(taxBucket.igst);
+  const taxTotal = money(taxSplitTotal || taxBucket.totalTax || purchase.taxAmount);
   const roundOffAmount = roundMoney(purchase.roundOff);
   const paidAmount = purchase.paymentMethod === "credit"
     ? 0
@@ -235,8 +288,6 @@ export const postPurchaseAccountingVoucher = async (
     throw new Error("Purchase ledger is not configured.");
   }
 
-  const cashLedger = await requireLedger("Cash", settings.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH, session);
-  const bankLedger = await requireLedger("Bank", settings.defaultBankLedgerId, "PRIMARY_BANK", LEDGER_TYPES.BANK, session);
   const purchaseDebit = money(grandTotal - taxTotal - roundOffAmount);
   const residual = roundMoney(grandTotal - purchaseDebit - taxTotal);
   const roundOffLedger = Math.abs(residual) > 0.009
@@ -255,9 +306,9 @@ export const postPurchaseAccountingVoucher = async (
     const taxLedgers = await getInputTaxLedgers(session);
 
     if (taxSplitTotal > 0) {
-      addEntry(entries, taxLedgers.cgst, money(purchase.totalCgst), 0, `Input CGST on Purchase Bill ${billNo}`);
-      addEntry(entries, taxLedgers.sgst, money(purchase.totalSgst), 0, `Input SGST on Purchase Bill ${billNo}`);
-      addEntry(entries, taxLedgers.igst, money(purchase.totalIgst), 0, `Input IGST on Purchase Bill ${billNo}`);
+      addEntry(entries, taxLedgers.cgst, money(taxBucket.cgst), 0, `Input CGST on Purchase Bill ${billNo}`);
+      addEntry(entries, taxLedgers.sgst, money(taxBucket.sgst), 0, `Input SGST on Purchase Bill ${billNo}`);
+      addEntry(entries, taxLedgers.igst, money(taxBucket.igst), 0, `Input IGST on Purchase Bill ${billNo}`);
     } else {
       const fallbackTaxLedger = taxLedgers.igst;
       if (!fallbackTaxLedger) {
@@ -281,7 +332,9 @@ export const postPurchaseAccountingVoucher = async (
   }
 
   if (paidAmount > 0) {
-    const paymentLedger = purchase.paymentMethod === "cash" ? cashLedger : bankLedger;
+    const paymentLedger = purchase.paymentMethod === "cash"
+      ? await getOrCreateCashBankLedger(null, settings, session, createdBy)
+      : await getOrCreateCashBankLedger(purchase.cashBankAccountId, settings, session, createdBy);
 
     if (supplierLedger) {
       addEntry(entries, supplierLedger, paidAmount, 0, `Payment made against Purchase Bill ${billNo}`, {

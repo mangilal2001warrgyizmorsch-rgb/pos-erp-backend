@@ -39,30 +39,37 @@ export const defaultAccountGroups = [
     normalBalance: NORMAL_BALANCE.DEBIT,
   },
   {
+    name: "Current Assets",
+    code: "CURRENT_ASSETS",
+    parentCode: "ASSET",
+    nature: ACCOUNT_NATURE.ASSET,
+    normalBalance: NORMAL_BALANCE.DEBIT,
+  },
+  {
     name: "Cash in Hand",
     code: "CASH_IN_HAND",
-    parentCode: "ASSET",
+    parentCode: "CURRENT_ASSETS",
     nature: ACCOUNT_NATURE.ASSET,
     normalBalance: NORMAL_BALANCE.DEBIT,
   },
   {
     name: "Bank Accounts",
     code: "BANK_ACCOUNTS",
-    parentCode: "ASSET",
+    parentCode: "CURRENT_ASSETS",
     nature: ACCOUNT_NATURE.ASSET,
     normalBalance: NORMAL_BALANCE.DEBIT,
   },
   {
     name: "Sundry Debtors",
     code: "SUNDRY_DEBTORS",
-    parentCode: "ASSET",
+    parentCode: "CURRENT_ASSETS",
     nature: ACCOUNT_NATURE.ASSET,
     normalBalance: NORMAL_BALANCE.DEBIT,
   },
   {
     name: "Stock in Hand",
     code: "STOCK_IN_HAND",
-    parentCode: "ASSET",
+    parentCode: "CURRENT_ASSETS",
     nature: ACCOUNT_NATURE.ASSET,
     normalBalance: NORMAL_BALANCE.DEBIT,
   },
@@ -287,6 +294,19 @@ export const defaultLedgerDefinitions = [
     groupCode: "INDIRECT_EXPENSES",
     ledgerType: LEDGER_TYPES.EXPENSE,
   },
+  {
+    name: "Cash Adjustment A/c",
+    code: "CASH_ADJUSTMENT",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.OTHER,
+  },
+  {
+    name: "Opening Balance Equity A/c",
+    code: "OPENING_BALANCE_EQUITY",
+    groupCode: "CAPITAL_ACCOUNT",
+    ledgerType: LEDGER_TYPES.OTHER,
+    normalBalance: NORMAL_BALANCE.CREDIT,
+  },
 ];
 
 export const defaultVoucherTypes = [
@@ -338,6 +358,11 @@ const valuesEqual = (currentValue, nextValue) => {
   return String(currentValue ?? "") === String(nextValue ?? "");
 };
 
+const normalizeName = (value) => String(value || "")
+  .toLowerCase()
+  .replace(/\ba\/?c\b/g, "")
+  .replace(/[^a-z0-9]/g, "");
+
 const setIfDifferent = (updates, document, field, nextValue) => {
   if (nextValue === undefined) return;
   if (!valuesEqual(document[field], nextValue)) {
@@ -353,6 +378,12 @@ export const initializeDefaultAccountGroups = async (createdBy) => {
     const parentGroupId = group.parentCode ? groupsByCode[group.parentCode]?._id : undefined;
     const codesToFind = [group.code, ...(group.legacyCodes || [])];
     let existing = await AccountGroup.findOne({ code: { $in: codesToFind } });
+    if (!existing) {
+      const nameCandidates = await AccountGroup.find({ isActive: true }).select("name code");
+      const normalizedName = normalizeName(group.name);
+      const match = nameCandidates.find((candidate) => normalizeName(candidate.name) === normalizedName);
+      if (match) existing = await AccountGroup.findById(match._id);
+    }
 
     if (!existing) {
       const created = await AccountGroup.create({
@@ -408,6 +439,12 @@ export const initializeDefaultLedgers = async (groupsByCode, createdBy) => {
     }
 
     let existing = await Ledger.findOne({ code: ledger.code });
+    if (!existing) {
+      const nameCandidates = await Ledger.find({ isActive: true }).select("name code");
+      const normalizedName = normalizeName(ledger.name);
+      const match = nameCandidates.find((candidate) => normalizeName(candidate.name) === normalizedName);
+      if (match) existing = await Ledger.findById(match._id);
+    }
 
     if (!existing) {
       const created = await Ledger.create({
@@ -416,9 +453,9 @@ export const initializeDefaultLedgers = async (groupsByCode, createdBy) => {
         groupId: group._id,
         ledgerType: ledger.ledgerType,
         openingBalance: 0,
-        openingBalanceType: group.normalBalance,
+        openingBalanceType: ledger.normalBalance || group.normalBalance,
         currentBalance: 0,
-        currentBalanceType: group.normalBalance,
+        currentBalanceType: ledger.normalBalance || group.normalBalance,
         partyType: "none",
         isSystemDefault: true,
         isActive: true,
@@ -430,12 +467,13 @@ export const initializeDefaultLedgers = async (groupsByCode, createdBy) => {
 
     const updates = {};
     if (!existing.name) updates.name = ledger.name;
+    setIfDifferent(updates, existing, "code", ledger.code);
     setIfDifferent(updates, existing, "groupId", group._id);
     setIfDifferent(updates, existing, "ledgerType", ledger.ledgerType);
     setIfDifferent(updates, existing, "isSystemDefault", true);
     setIfDifferent(updates, existing, "isActive", true);
-    if (!existing.openingBalanceType) updates.openingBalanceType = group.normalBalance;
-    if (!existing.currentBalanceType) updates.currentBalanceType = group.normalBalance;
+    if (!existing.openingBalanceType) updates.openingBalanceType = ledger.normalBalance || group.normalBalance;
+    if (!existing.currentBalanceType) updates.currentBalanceType = ledger.normalBalance || group.normalBalance;
     if (!existing.partyType) updates.partyType = "none";
     if (!existing.createdBy && createdBy) updates.createdBy = createdBy;
 

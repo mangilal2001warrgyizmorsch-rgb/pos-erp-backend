@@ -120,7 +120,13 @@ export const getOrCreateCashBankLedger = async (accountInput, settings, session 
       : null;
 
   if (!account || account.accountType === "cash") {
-    return requireLedger("Cash", settings?.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH, session);
+    const cashLedger = await requireLedger("Cash", settings?.defaultCashLedgerId, "CASH", LEDGER_TYPES.CASH, session);
+    if (account && String(account.accountingLedgerId || "") !== String(cashLedger._id)) {
+      account.accountingLedgerId = cashLedger._id;
+      account.accountingLinked = true;
+      await account.save({ session, validateBeforeSave: false });
+    }
+    return cashLedger;
   }
 
   if (account.accountingLedgerId) {

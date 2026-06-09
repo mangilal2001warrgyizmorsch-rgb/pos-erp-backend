@@ -27,7 +27,19 @@ const purchaseItemSchema = new mongoose.Schema({
     type: Number, // GST % for this specific item (e.g. 18)
     default: 0,
   },
+  gstRate: {
+    type: Number,
+    default: 0,
+  },
+  taxableAmount: {
+    type: Number,
+    default: 0,
+  },
   cgst: {
+    type: Number,
+    default: 0,
+  },
+  cgstAmount: {
     type: Number,
     default: 0,
   },
@@ -35,13 +47,25 @@ const purchaseItemSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  sgstAmount: {
+    type: Number,
+    default: 0,
+  },
   igst: {
+    type: Number,
+    default: 0,
+  },
+  igstAmount: {
     type: Number,
     default: 0,
   },
   taxAmount: {
     type: Number,
     default: 0,
+  },
+  hsn: {
+    type: String,
+    trim: true,
   },
   salesPrice: {
     type: Number,
@@ -87,8 +111,16 @@ const purchaseSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    taxableAmount: {
+      type: Number,
+      default: 0,
+    },
     // Overall invoice tax sums
     totalCgst: {
+      type: Number,
+      default: 0,
+    },
+    cgstAmount: {
       type: Number,
       default: 0,
     },
@@ -96,11 +128,23 @@ const purchaseSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    sgstAmount: {
+      type: Number,
+      default: 0,
+    },
     totalIgst: {
       type: Number,
       default: 0,
     },
+    igstAmount: {
+      type: Number,
+      default: 0,
+    },
     taxAmount: { // Total tax sum
+      type: Number,
+      default: 0,
+    },
+    totalTax: {
       type: Number,
       default: 0,
     },
@@ -119,6 +163,10 @@ const purchaseSchema = new mongoose.Schema(
     totalAmount: {
       type: Number,
       required: true,
+    },
+    grandTotal: {
+      type: Number,
+      default: 0,
     },
     paymentMethod: {
       type: String,

@@ -17,6 +17,7 @@ import {
   markSaleAccountingFailure,
   postSaleAccountingVoucher,
 } from '../services/accounting/salesAccounting.service.js';
+import { ensureCustomerAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -103,9 +104,16 @@ export const createSale = async (req, res, next) => {
         purchasePrice: avgPurchasePrice,
         profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
         taxRate: item.taxRate || 0,
+        gstRate: item.gstRate || item.taxRate || 0,
+        taxableAmount: item.taxableAmount ?? (item.unitPrice * item.quantity),
         cgst: item.cgst || 0,
+        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
         sgst: item.sgst || 0,
+        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
         igst: item.igst || 0,
+        igstAmount: item.igstAmount ?? item.igst ?? 0,
+        taxAmount: item.taxAmount ?? ((Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0))),
+        hsn: item.hsn || product.hsnCode || product.hsn,
         total: item.unitPrice * item.quantity,
       });
     }
@@ -120,12 +128,18 @@ export const createSale = async (req, res, next) => {
       taxRate: taxRate || 0,
       taxAmount: taxAmount || 0,
       totalCgst: totalCgst || 0,
+      cgstAmount: totalCgst || 0,
       totalSgst: totalSgst || 0,
+      sgstAmount: totalSgst || 0,
       totalIgst: totalIgst || 0,
+      igstAmount: totalIgst || 0,
+      taxableAmount: Number(subtotal || 0) - Number(discountAmount || 0),
+      totalTax: taxAmount || 0,
       discountType: discountType || 'fixed',
       discountValue: discountValue || 0,
       discountAmount: discountAmount || 0,
       totalAmount,
+      grandTotal: totalAmount,
       paymentMethod,
       paymentStatus: paymentStatus || 'paid',
       amountPaid: amountPaid || totalAmount,
@@ -145,6 +159,8 @@ export const createSale = async (req, res, next) => {
 
     // Update customer stats if customer exists
     if (customer) {
+      await ensureCustomerAccountingLedger(customer, session, req.user._id);
+
       await Customer.findByIdAndUpdate(
         customer,
         {
@@ -884,9 +900,16 @@ export const updateSale = async (req, res, next) => {
         purchasePrice: avgPurchasePrice,
         profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
         taxRate: item.taxRate || 0,
+        gstRate: item.gstRate || item.taxRate || 0,
+        taxableAmount: item.taxableAmount ?? (item.unitPrice * item.quantity),
         cgst: item.cgst || 0,
+        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
         sgst: item.sgst || 0,
+        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
         igst: item.igst || 0,
+        igstAmount: item.igstAmount ?? item.igst ?? 0,
+        taxAmount: item.taxAmount ?? ((Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0))),
+        hsn: item.hsn || product.hsnCode || product.hsn,
         total: item.unitPrice * item.quantity,
       });
     }
@@ -899,12 +922,18 @@ export const updateSale = async (req, res, next) => {
     sale.taxRate = taxRate || 0;
     sale.taxAmount = taxAmount || 0;
     sale.totalCgst = totalCgst || 0;
+    sale.cgstAmount = totalCgst || 0;
     sale.totalSgst = totalSgst || 0;
+    sale.sgstAmount = totalSgst || 0;
     sale.totalIgst = totalIgst || 0;
+    sale.igstAmount = totalIgst || 0;
+    sale.taxableAmount = Number(subtotal || 0) - Number(discountAmount || 0);
+    sale.totalTax = taxAmount || 0;
     sale.discountType = discountType || 'fixed';
     sale.discountValue = discountValue || 0;
     sale.discountAmount = discountAmount || 0;
     sale.totalAmount = totalAmount;
+    sale.grandTotal = totalAmount;
     sale.paymentMethod = paymentMethod;
     sale.paymentStatus = paymentStatus || 'paid';
     sale.amountPaid = amountPaid || totalAmount;

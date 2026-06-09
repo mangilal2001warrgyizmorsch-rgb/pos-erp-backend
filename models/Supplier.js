@@ -56,6 +56,10 @@ const supplierSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    accountingLedgerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Ledger',
+    },
     state: {
       type: String, // E.g. "Maharashtra", "Gujarat"
       trim: true,
@@ -81,5 +85,7 @@ const supplierSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+supplierSchema.index({ accountingLedgerId: 1 });
 
 export default mongoose.model('Supplier', supplierSchema);
