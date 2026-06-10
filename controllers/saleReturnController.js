@@ -15,6 +15,7 @@ import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { postSaleReturnAccountingVoucher } from '../services/accounting/returnAccounting.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
 // @desc    Create Sale Return / Credit Note
 // @route   POST /api/sales-returns
@@ -200,18 +201,22 @@ export const createSaleReturn = async (req, res, next) => {
     }
 
     // 8. Update original sale invoice return status
-    originalSale.returnStatus = 'partially_returned';
     for (const item of validatedItems) {
       const originalItem = originalSale.items.find(
         (i) => i.product.toString() === item.product.toString()
       );
       if (originalItem) {
         originalItem.returnedQty = (originalItem.returnedQty || 0) + item.returnQty;
-        if (originalItem.returnedQty >= originalItem.quantity) {
-          originalSale.returnStatus = 'fully_returned';
-        }
       }
     }
+    const hasReturnedItems = originalSale.items.some((i) => (i.returnedQty || 0) > 0);
+    const allItemsReturned = originalSale.items.length > 0
+      && originalSale.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+    originalSale.returnStatus = allItemsReturned
+      ? 'fully_returned'
+      : hasReturnedItems
+        ? 'partially_returned'
+        : 'not_returned';
     await originalSale.save({ session, validateBeforeSave: false });
 
     // 9. Handle refund and double-entry alignments via partyLedgerService
@@ -502,25 +507,36 @@ export const cancelSaleReturn = async (req, res, next) => {
           (i) => i.product.toString() === item.product.toString()
         );
         if (originalItem) {
-          originalItem.returnedQty = (originalItem.returnedQty || 0) - item.returnQty;
+          originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
       }
-      originalSale.returnStatus = originalSale.items.some(
-        (i) => (i.returnedQty || 0) > 0
-      ) ? 'partially_returned' : 'not_returned';
+      const hasReturnedItems = originalSale.items.some((i) => (i.returnedQty || 0) > 0);
+      const allItemsReturned = originalSale.items.length > 0
+        && originalSale.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+      originalSale.returnStatus = allItemsReturned
+        ? 'fully_returned'
+        : hasReturnedItems
+          ? 'partially_returned'
+          : 'not_returned';
       await originalSale.save({ session, validateBeforeSave: false });
     }
 
-    // Reverse refund if any
-    if (saleReturn.refundedAmount > 0 && saleReturn.cashBankAccountId) {
-      const bankAccount = await BankAccount.findById(
-        saleReturn.cashBankAccountId
-      ).session(session);
-      if (bankAccount) {
-        bankAccount.currentBalance += saleReturn.refundedAmount;
-        await bankAccount.save({ session });
+    // Reverse cash/bank transactions and remove their completed movement rows
+    const cashTransactions = await CashBankTransaction.find({ referenceId: saleReturn._id, status: 'completed' }).session(session);
+    for (const tx of cashTransactions) {
+      if (tx.accountId) {
+        const bankAccount = await BankAccount.findById(tx.accountId).session(session);
+        if (bankAccount) {
+          if (tx.direction === 'in') {
+            bankAccount.currentBalance -= tx.amount;
+          } else {
+            bankAccount.currentBalance += tx.amount;
+          }
+          await bankAccount.save({ session, validateBeforeSave: false });
+        }
       }
     }
+    await CashBankTransaction.deleteMany({ referenceId: saleReturn._id }).session(session);
 
     // Reverse credit balance
     const customer = await Customer.findById(saleReturn.customer).session(session);
@@ -528,9 +544,19 @@ export const cancelSaleReturn = async (req, res, next) => {
       customer.walletBalance = (customer.walletBalance || 0) - saleReturn.creditBalance;
       await customer.save({ session, validateBeforeSave: false });
     }
+    await PartyLedger.deleteMany({ referenceId: saleReturn._id }).session(session);
 
     saleReturn.status = 'cancelled';
     await saleReturn.save({ session });
+
+    if (saleReturn.accountingVoucherId) {
+      await cancelVoucher(saleReturn.accountingVoucherId, `Sale return ${saleReturn.creditNoteNo} cancelled`, req.user._id, { session });
+      saleReturn.accountingVoucherId = undefined;
+      saleReturn.accountingPosted = false;
+      saleReturn.accountingStatus = 'not_posted';
+      saleReturn.accountingError = '';
+      await saleReturn.save({ session, validateBeforeSave: false });
+    }
 
     if (session) {
       await session.commitTransaction();
@@ -596,12 +622,17 @@ export const deleteSaleReturn = async (req, res, next) => {
           (i) => i.product.toString() === item.product.toString()
         );
         if (originalItem) {
-          originalItem.returnedQty = (originalItem.returnedQty || 0) - item.returnQty;
+          originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
       }
-      originalSale.returnStatus = originalSale.items.some(
-        (i) => (i.returnedQty || 0) > 0
-      ) ? 'partially_returned' : 'not_returned';
+      const hasReturnedItems = originalSale.items.some((i) => (i.returnedQty || 0) > 0);
+      const allItemsReturned = originalSale.items.length > 0
+        && originalSale.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+      originalSale.returnStatus = allItemsReturned
+        ? 'fully_returned'
+        : hasReturnedItems
+          ? 'partially_returned'
+          : 'not_returned';
       await originalSale.save({ session, validateBeforeSave: false });
     }
 
@@ -636,6 +667,10 @@ export const deleteSaleReturn = async (req, res, next) => {
     await PartyLedger.deleteMany({ referenceId: saleReturn._id }).session(session);
 
     // 5. Delete the sale return document
+    if (saleReturn.accountingVoucherId) {
+      await cancelVoucher(saleReturn.accountingVoucherId, `Sale return ${saleReturn.creditNoteNo} deleted`, req.user._id, { session });
+    }
+
     await SalesReturn.findByIdAndDelete(saleReturn._id).session(session);
 
     if (session) {

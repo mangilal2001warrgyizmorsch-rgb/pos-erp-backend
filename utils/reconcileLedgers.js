@@ -5,7 +5,7 @@ import Customer from '../models/Customer.js';
 import Supplier from '../models/Supplier.js';
 import PaymentIn from '../models/PaymentIn.js';
 import PaymentOut from '../models/PaymentOut.js';
-import SaleReturn from '../models/SaleReturn.js';
+import SalesReturn from '../models/SalesReturn.js';
 import PurchaseReturn from '../models/PurchaseReturn.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 
@@ -119,7 +119,7 @@ export const reconcileLegacyLedgers = async () => {
     }
 
     // 5. Reconcile Sales Returns
-    const saleReturns = await SaleReturn.find({ customerId: { $ne: null } });
+    const saleReturns = await SalesReturn.find({ customer: { $ne: null } });
     let saleReturnsReconciled = 0;
 
     for (const ret of saleReturns) {
@@ -133,14 +133,14 @@ export const reconcileLegacyLedgers = async () => {
         }
 
         await partyLedgerService.createEntry({
-          partyId: ret.customerId,
+          partyId: ret.customer,
           partyType: 'Customer',
           type: 'return',
           debitAmount: ledgerDebit,
           creditAmount: ledgerCredit,
           referenceId: ret._id,
           receiptNo: ret.creditNoteNo,
-          notes: `Credit Note ${ret.creditNoteNo} for Sale Return of Invoice ${ret.originalInvoiceNo} (Auto-synchronized). Refund type: ${ret.refundType}`,
+          notes: `Credit Note ${ret.creditNoteNo} for Sale Return of Invoice ${ret.invoiceNumber} (Auto-synchronized). Refund type: ${ret.refundType}`,
           date: ret.returnDate || ret.createdAt || new Date()
         });
         saleReturnsReconciled++;

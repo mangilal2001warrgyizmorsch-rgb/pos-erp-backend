@@ -203,6 +203,16 @@ const markPurchaseAccounting = async (purchase, fields, session = null) => {
   await purchase.save({ session });
 };
 
+export const markPurchaseAccountingFailure = async (purchaseId, error) => {
+  const purchase = await Purchase.findById(purchaseId);
+  if (!purchase) return;
+  await markPurchaseAccounting(purchase, {
+    accountingPosted: false,
+    accountingStatus: "failed",
+    accountingError: String(error?.message || error || "Accounting posting failed").slice(0, 500),
+  });
+};
+
 const getExistingVoucher = async (purchase, session = null) => {
   if (purchase.accountingVoucherId) {
     const voucher = await queryWithSession(Voucher.findById(purchase.accountingVoucherId), session);

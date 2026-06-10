@@ -25,6 +25,7 @@ import purchaseRoutes from './routes/purchaseRoutes.js';
 import saleReturnRoutes from './routes/saleReturnRoutes.js';
 import purchaseReturnRoutes from './routes/purchaseReturnRoutes.js';
 import expenseRoutes from './routes/expenseRoutes.js';
+import expenseCategoryRoutes from './routes/expenseCategoryRoutes.js';
 import returnRoutes from './routes/returnRoutes.js';
 import shiftRoutes from './routes/shiftRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
@@ -40,6 +41,7 @@ import paymentOutRoutes from './routes/paymentOutRoutes.js';
 import cashBankRoutes from './routes/cashBankRoutes.js';
 import partyLedgerRoutes from './routes/partyLedgerRoutes.js';
 import inventoryRoutes from './routes/inventoryRoutes.js';
+import stockRoutes from './routes/stockRoutes.js';
 import activityLogRoutes from './routes/activityLogRoutes.js';
 import accountingRoutes from './routes/accounting.routes.js';
 import { reconcileLegacyLedgers } from './utils/reconcileLedgers.js';
@@ -53,9 +55,19 @@ connectDB();
 
 const app = express();
 
+const configuredOrigins = (process.env.CORS_ORIGIN || process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
 // Middleware
 app.use(cors({
-  origin: true,
+  origin: (origin, callback) => {
+    if (!origin || process.env.NODE_ENV !== 'production' || configuredOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -80,8 +92,8 @@ const authLimiter = rateLimit({
   message: 'Too many login attempts from this IP, please try again after 15 minutes',
 });
 
-// app.use('/api/', apiLimiter);
-// app.use('/api/auth', authLimiter);
+app.use('/api/', apiLimiter);
+app.use('/api/auth', authLimiter);
 
 
 if (process.env.NODE_ENV === 'development') {
@@ -110,6 +122,7 @@ app.use('/api/sale-returns', saleReturnRoutes);
 app.use('/api/purchases-returns', purchaseReturnRoutes);
 app.use('/api/purchase-returns', purchaseReturnRoutes);
 app.use('/api/expenses', expenseRoutes);
+app.use('/api/expense-categories', expenseCategoryRoutes);
 app.use('/api/returns', returnRoutes);
 app.use('/api/shifts', shiftRoutes);
 app.use('/api/analytics', analyticsRoutes);
@@ -125,6 +138,7 @@ app.use('/api/payment-out', paymentOutRoutes);
 app.use('/api/cash-bank', cashBankRoutes);
 app.use('/api/ledger', partyLedgerRoutes);
 app.use('/api/inventory', inventoryRoutes);
+app.use('/api/stock', stockRoutes);
 app.use('/api/activity-logs', activityLogRoutes);
 app.use('/api/accounting', accountingRoutes);
 
@@ -137,7 +151,7 @@ app.get('/api/health', (req, res) => {
 // Error handler
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5500;
 
 const server = http.createServer(app);
 initSocket(server);

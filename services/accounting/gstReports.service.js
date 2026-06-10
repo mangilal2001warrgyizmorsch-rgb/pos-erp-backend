@@ -59,9 +59,26 @@ const docTaxBucket = (doc) => extractGSTAmounts(doc, doc.items || [], {
   partyStateCode: doc.customer?.stateCode || doc.supplier?.stateCode,
 });
 
-const splitReturnTax = (returnDoc) => {
+const splitReturnTax = async (returnDoc, SourceModel, sourceId) => {
   const totalTax = roundMoney(returnDoc.totalTax || returnDoc.items?.reduce((sum, item) => sum + Number(item.taxAmount || 0), 0));
-  return calculateGSTSplit(totalTax, "intra");
+  if (totalTax <= 0) return { cgst: 0, sgst: 0, igst: 0, totalTax: 0 };
+
+  const source = sourceId ? await SourceModel.findById(sourceId).lean() : null;
+  const sourceCgst = roundMoney(source?.totalCgst || source?.cgstAmount || 0);
+  const sourceSgst = roundMoney(source?.totalSgst || source?.sgstAmount || 0);
+  const sourceIgst = roundMoney(source?.totalIgst || source?.igstAmount || 0);
+  const sourceTotal = roundMoney(sourceCgst + sourceSgst + sourceIgst);
+  if (sourceTotal > 0) {
+    const cgst = roundMoney((totalTax * sourceCgst) / sourceTotal);
+    const sgst = roundMoney((totalTax * sourceSgst) / sourceTotal);
+    const igst = roundMoney(totalTax - cgst - sgst);
+    return { cgst, sgst, igst, totalTax };
+  }
+
+  const supplyType = String(returnDoc.stateOfSupply || source?.stateOfSupply || "").toLowerCase().includes("inter")
+    ? "inter"
+    : "intra";
+  return calculateGSTSplit(totalTax, supplyType);
 };
 
 const getSalesDocs = (filters = {}) => Sale.find({
@@ -151,20 +168,30 @@ export const getInputGSTReport = async (filters = {}) => {
 
 const getReturnBuckets = async (filters = {}) => {
   const [salesReturns, purchaseReturns] = await Promise.all([getSalesReturnDocs(filters), getPurchaseReturnDocs(filters)]);
-  const salesReturnTax = salesReturns.reduce((acc, ret) => {
-    const split = splitReturnTax(ret);
-    return addGSTBucket(acc, {
+  const salesReturnRows = await Promise.all(salesReturns.map(async (ret) => {
+    const split = await splitReturnTax(ret, Sale, ret.sale);
+    return {
       taxableAmount: roundMoney(Number(ret.subtotal || 0) - Number(ret.totalDiscount || 0)),
       ...split,
       totalValue: ret.grandTotal,
+    };
+  }));
+  const purchaseReturnRows = await Promise.all(purchaseReturns.map(async (ret) => {
+    const split = await splitReturnTax(ret, Purchase, ret.purchase);
+    return {
+      taxableAmount: roundMoney(Number(ret.subtotal || 0) - Number(ret.totalDiscount || 0)),
+      ...split,
+      totalValue: ret.grandTotal,
+    };
+  }));
+  const salesReturnTax = salesReturnRows.reduce((acc, row) => {
+    return addGSTBucket(acc, {
+      ...row,
     });
   }, makeEmptyGSTBucket());
-  const purchaseReturnTax = purchaseReturns.reduce((acc, ret) => {
-    const split = splitReturnTax(ret);
+  const purchaseReturnTax = purchaseReturnRows.reduce((acc, row) => {
     return addGSTBucket(acc, {
-      taxableAmount: roundMoney(Number(ret.subtotal || 0) - Number(ret.totalDiscount || 0)),
-      ...split,
-      totalValue: ret.grandTotal,
+      ...row,
     });
   }, makeEmptyGSTBucket());
   return { salesReturnTax, purchaseReturnTax, salesReturns, purchaseReturns };

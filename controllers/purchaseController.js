@@ -14,8 +14,9 @@ import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
 import { recordStockMovement } from '../utils/stockMovement.js';
-import { postPurchaseAccountingVoucher } from '../services/accounting/purchaseAccounting.service.js';
+import { markPurchaseAccountingFailure, postPurchaseAccountingVoucher } from '../services/accounting/purchaseAccounting.service.js';
 import { ensureSupplierAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
 export const createPurchase = async (req, res, next) => {
   const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
@@ -431,6 +432,10 @@ export const deletePurchase = async (req, res, next) => {
       await CashBankTransaction.deleteMany({ referenceId: purchase._id }).session(session);
     }
 
+    if (purchase.accountingVoucherId) {
+      await cancelVoucher(purchase.accountingVoucherId, `Purchase ${purchase.purchaseNumber} deleted`, req.user._id, { session });
+    }
+
     await Purchase.findByIdAndDelete(purchase._id).session(session);
 
     if (session) {
@@ -467,6 +472,7 @@ export const updatePurchase = async (req, res, next) => {
     if (!purchase) {
       return res.status(404).json({ success: false, message: 'Purchase not found' });
     }
+    const previousAccountingVoucherId = purchase.accountingVoucherId;
 
     const {
       items,
@@ -686,10 +692,19 @@ export const updatePurchase = async (req, res, next) => {
       }, session);
     }
 
+    if (previousAccountingVoucherId) {
+      await cancelVoucher(previousAccountingVoucherId, `Purchase ${purchase.purchaseNumber} updated`, req.user._id, { session });
+      purchase.accountingVoucherId = undefined;
+      purchase.accountingPosted = false;
+      purchase.accountingStatus = 'not_posted';
+      purchase.accountingError = '';
+      await purchase.save({ session, validateBeforeSave: false });
+    }
+
     await postPurchaseAccountingVoucher(purchase, {
       session,
       createdBy: req.user._id,
-      source: 'create_purchase',
+      source: 'update_purchase',
     });
 
     if (session) {

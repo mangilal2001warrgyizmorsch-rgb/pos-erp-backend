@@ -19,6 +19,11 @@ const saleItemSchema = new mongoose.Schema({
     required: true,
     min: [1, 'Quantity must be at least 1'],
   },
+  returnedQty: {
+    type: Number,
+    default: 0,
+    min: [0, 'Returned quantity cannot be negative'],
+  },
   unitPrice: { // This is the salesPrice
     type: Number,
     required: true,
@@ -95,6 +100,10 @@ const saleSchema = new mongoose.Schema(
     customerName: {
       type: String,
       default: 'Walk-in Customer',
+    },
+    stateOfSupply: {
+      type: String,
+      trim: true,
     },
     items: [saleItemSchema],
     subtotal: {
@@ -185,6 +194,11 @@ const saleSchema = new mongoose.Schema(
       type: String,
       enum: ['completed', 'cancelled', 'refunded'],
       default: 'completed',
+    },
+    returnStatus: {
+      type: String,
+      enum: ['not_returned', 'partially_returned', 'fully_returned'],
+      default: 'not_returned',
     },
     notes: {
       type: String,

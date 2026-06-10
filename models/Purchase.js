@@ -19,6 +19,11 @@ const purchaseItemSchema = new mongoose.Schema({
     required: true,
     min: [1, 'Quantity must be at least 1'],
   },
+  returnedQty: {
+    type: Number,
+    default: 0,
+    min: [0, 'Returned quantity cannot be negative'],
+  },
   purchasePrice: {
     type: Number,
     required: true,
@@ -190,6 +195,11 @@ const purchaseSchema = new mongoose.Schema(
       type: String,
       enum: ['draft', 'confirmed', 'received', 'cancelled', 'returned'],
       default: 'confirmed',
+    },
+    returnStatus: {
+      type: String,
+      enum: ['not_returned', 'partially_returned', 'fully_returned'],
+      default: 'not_returned',
     },
     notes: {
       type: String,

@@ -9,6 +9,7 @@ import { VOUCHER_STATUS } from "../../constants/accounting.constants.js";
 import { createAccountingError } from "../../utils/accountingError.js";
 import { createAuditLog } from "../auditLog.service.js";
 import { updateLedgerBalance } from "./ledger.service.js";
+import { defaultVoucherTypes } from "./seedAccounting.service.js";
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const padVoucherNumber = (number) => String(number).padStart(4, "0");
@@ -129,7 +130,7 @@ const findExistingPostedReferenceVoucher = async (payload, session = null) => {
     referenceModule: payload.referenceModule,
     referenceId: payload.referenceId,
     voucherTypeCode: String(payload.voucherTypeCode || "").toUpperCase(),
-    status: { $ne: VOUCHER_STATUS.CANCELLED },
+    status: { $nin: [VOUCHER_STATUS.CANCELLED, VOUCHER_STATUS.REVERSED] },
   });
   if (session) query.session(session);
   return query;
@@ -151,18 +152,46 @@ const getVoucherTypeByCode = async (voucherTypeCode, session = null) => {
     throw new Error("Voucher type code is required.");
   }
 
+  const upperCode = String(voucherTypeCode).toUpperCase();
   const query = VoucherType.findOne({
-    code: String(voucherTypeCode).toUpperCase(),
+    code: upperCode,
     isActive: true,
   });
   if (session) query.session(session);
 
-  const voucherType = await query;
-  if (!voucherType) {
-    throw new Error("Voucher type not found.");
+  let voucherType = await query;
+  if (voucherType) {
+    return voucherType;
   }
 
-  return voucherType;
+  // Reactivate an existing voucher type if it was created but marked inactive.
+  const inactiveQuery = VoucherType.findOne({ code: upperCode });
+  if (session) inactiveQuery.session(session);
+  voucherType = await inactiveQuery;
+  if (voucherType) {
+    if (!voucherType.isActive) {
+      voucherType.isActive = true;
+      await voucherType.save({ session });
+    }
+    return voucherType;
+  }
+
+  // If the voucher type is part of the default set, create it on demand.
+  const defaultType = defaultVoucherTypes.find((type) => String(type.code).toUpperCase() === upperCode);
+  if (defaultType) {
+    const createData = {
+      ...defaultType,
+      suffix: "",
+      currentNumber: 0,
+      numberingMethod: "automatic",
+      isSystemDefault: true,
+      isActive: true,
+    };
+    const created = await VoucherType.create([createData], session ? { session } : undefined);
+    return Array.isArray(created) ? created[0] : created;
+  }
+
+  throw new Error("Voucher type not found.");
 };
 
 export const generateVoucherNo = async (voucherTypeCode, session = null) => {
@@ -454,8 +483,9 @@ export const postVoucher = async (payloadOrVoucherId, userId = null, options = {
   return getVoucherById(result.voucher._id);
 };
 
-export const cancelVoucher = async (voucherId, cancellationReason, userId = null) => {
-  const cancelledVoucherId = await runAccountingWrite(async (session) => {
+export const cancelVoucher = async (voucherId, cancellationReason, userId = null, options = {}) => {
+  const usingExternalSession = Boolean(options.session);
+  const cancelledVoucherId = await executeAccountingWrite(async (session) => {
     const voucher = await Voucher.findById(voucherId).session(session);
     if (!voucher) {
       throw new Error("Voucher not found.");
@@ -483,15 +513,21 @@ export const cancelVoucher = async (voucherId, cancellationReason, userId = null
     voucher.cancellationReason = cancellationReason;
     await voucher.save({ session });
     return voucher._id;
-  });
+  }, options.session);
 
-  await createAuditLog({
-    userId,
-    action: "VOUCHER_CANCELLED",
-    module: "accounting_voucher",
-    referenceId: cancelledVoucherId,
-    description: cancellationReason || "Accounting voucher cancelled",
-  });
+  if (!usingExternalSession) {
+    await createAuditLog({
+      userId,
+      action: "VOUCHER_CANCELLED",
+      module: "accounting_voucher",
+      referenceId: cancelledVoucherId,
+      description: cancellationReason || "Accounting voucher cancelled",
+    });
+  }
+
+  if (usingExternalSession) {
+    return Voucher.findById(cancelledVoucherId).session(options.session);
+  }
 
   return getVoucherById(cancelledVoucherId);
 };

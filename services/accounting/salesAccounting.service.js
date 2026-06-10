@@ -200,12 +200,13 @@ const markSaleAccounting = async (saleId, fields) => {
 const getExistingVoucher = async (sale) => {
   if (sale.accountingVoucherId) {
     const voucher = await Voucher.findById(sale.accountingVoucherId);
-    if (voucher) return voucher;
+    if (voucher && !["CANCELLED", "REVERSED"].includes(voucher.status)) return voucher;
   }
 
   return Voucher.findOne({
     referenceModule: SALE_REFERENCE_MODULE,
     referenceId: sale._id,
+    status: { $nin: ["CANCELLED", "REVERSED"] },
   });
 };
 

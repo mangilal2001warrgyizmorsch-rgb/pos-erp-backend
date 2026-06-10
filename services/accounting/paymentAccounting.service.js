@@ -169,7 +169,14 @@ const getOrCreateSupplierLedger = async (supplierId, session = null, createdBy =
 };
 
 const getExistingVoucher = async (referenceModule, referenceId, session = null) => {
-  return queryWithSession(Voucher.findOne({ referenceModule, referenceId }), session);
+  return queryWithSession(
+    Voucher.findOne({
+      referenceModule,
+      referenceId,
+      status: { $nin: ["CANCELLED", "REVERSED"] },
+    }),
+    session,
+  );
 };
 
 const addEntry = (entries, ledger, debit, credit, narration, extra = {}) => {
@@ -205,7 +212,7 @@ export const postPaymentInAccountingVoucher = async (
     ? await queryWithSession(Voucher.findById(payment.accountingVoucherId), session)
     : await getExistingVoucher("payment_in", payment._id, session);
 
-  if (existingVoucher) {
+  if (existingVoucher && !["CANCELLED", "REVERSED"].includes(existingVoucher.status)) {
     payment.accountingVoucherId = existingVoucher._id;
     payment.accountingPosted = existingVoucher.status === "POSTED";
     payment.accountingStatus = existingVoucher.status === "POSTED" ? "posted" : "failed";
@@ -281,7 +288,7 @@ export const postPaymentOutAccountingVoucher = async (
     ? await queryWithSession(Voucher.findById(payment.accountingVoucherId), session)
     : await getExistingVoucher("payment_out", payment._id, session);
 
-  if (existingVoucher) {
+  if (existingVoucher && !["CANCELLED", "REVERSED"].includes(existingVoucher.status)) {
     payment.accountingVoucherId = existingVoucher._id;
     payment.accountingPosted = existingVoucher.status === "POSTED";
     payment.accountingStatus = existingVoucher.status === "POSTED" ? "posted" : "failed";

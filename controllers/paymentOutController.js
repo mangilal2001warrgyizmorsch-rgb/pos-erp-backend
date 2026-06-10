@@ -9,6 +9,7 @@ import mongoose from 'mongoose';
 import { createCashBankTransaction } from '../services/cashBankTransactionService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { postPaymentOutAccountingVoucher } from '../services/accounting/paymentAccounting.service.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 // @desc    Create a new payment out
@@ -202,6 +203,7 @@ export const deletePaymentOut = async (req, res) => {
   try {
     const payment = await PaymentOut.findById(req.params.id);
     if (!payment) throw new Error('Payment record not found');
+    const previousAccountingVoucherId = payment.accountingVoucherId;
 
     // Reverse the logic
     // Reverse the balance adjustment
@@ -236,8 +238,11 @@ export const deletePaymentOut = async (req, res) => {
       }
     }
 
-    await CashBankTransaction.deleteOne({ referenceId: payment._id });
+    await CashBankTransaction.deleteMany({ referenceId: payment._id });
     await PartyLedger.deleteOne({ referenceId: payment._id });
+    if (previousAccountingVoucherId) {
+      await cancelVoucher(previousAccountingVoucherId, `Payment Out ${payment.receiptNo} deleted`, req.user._id);
+    }
     await PaymentOut.findByIdAndDelete(req.params.id);
 
     res.status(200).json({ success: true, message: 'Payment deleted' });
@@ -261,6 +266,7 @@ export const updatePaymentOut = async (req, res) => {
     if (!payment) {
       return res.status(404).json({ success: false, message: 'Payment not found' });
     }
+    const previousAccountingVoucherId = payment.accountingVoucherId;
 
     const {
       partyId,
@@ -315,7 +321,7 @@ export const updatePaymentOut = async (req, res) => {
     }
 
     // Delete previous Ledger entry and CashBank transaction so we can recreate them
-    await CashBankTransaction.deleteOne({ referenceId: payment._id }).session(session);
+    await CashBankTransaction.deleteMany({ referenceId: payment._id }).session(session);
     await PartyLedger.deleteOne({ referenceId: payment._id }).session(session);
 
     // 2. Apply New Effects
@@ -335,18 +341,6 @@ export const updatePaymentOut = async (req, res) => {
     payment.date = date || Date.now();
 
     await payment.save({ session });
-
-    // Apply new account balance
-    let newAccount;
-    if (cashBankAccountIdClean) {
-      newAccount = await BankAccount.findById(cashBankAccountIdClean).session(session);
-    } else {
-      newAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
-    }
-    if (newAccount) {
-      newAccount.currentBalance -= amountPaid;
-      await newAccount.save({ session, validateBeforeSave: false });
-    }
 
     // Apply new Supplier outstanding balance
     newSupplier.outstandingBalance -= amountPaid;
@@ -404,6 +398,21 @@ export const updatePaymentOut = async (req, res) => {
       }
     }
 
+    if (previousAccountingVoucherId) {
+      await cancelVoucher(previousAccountingVoucherId, `Payment Out ${payment.receiptNo} updated`, req.user._id, { session });
+      payment.accountingVoucherId = undefined;
+      payment.accountingPosted = false;
+      payment.accountingStatus = 'not_posted';
+      payment.accountingError = '';
+      await payment.save({ session, validateBeforeSave: false });
+    }
+
+    await postPaymentOutAccountingVoucher(payment, {
+      session,
+      createdBy: req.user._id,
+      source: 'payment_out_update',
+    });
+
     if (session) {
       await session.commitTransaction();
     }
@@ -432,4 +441,3 @@ export const updatePaymentOut = async (req, res) => {
     }
   }
 };
-

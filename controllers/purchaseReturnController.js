@@ -15,6 +15,7 @@ import { inventoryService } from '../services/inventoryService.js';
 import { partyLedgerService } from '../services/partyLedgerService.js';
 import { postPurchaseReturnAccountingVoucher } from '../services/accounting/returnAccounting.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
 // @desc    Create Purchase Return / Debit Note
 // @route   POST /api/purchases-returns
@@ -191,18 +192,22 @@ export const createPurchaseReturn = async (req, res, next) => {
     }
 
     // 8. Update original purchase bill return status
-    originalPurchase.returnStatus = 'partially_returned';
     for (const item of validatedItems) {
       const originalItem = originalPurchase.items.find(
         (i) => i.product.toString() === item.product.toString()
       );
       if (originalItem) {
         originalItem.returnedQty = (originalItem.returnedQty || 0) + item.returnQty;
-        if (originalItem.returnedQty >= originalItem.quantity) {
-          originalPurchase.returnStatus = 'fully_returned';
-        }
       }
     }
+    const hasReturnedItems = originalPurchase.items.some((i) => (i.returnedQty || 0) > 0);
+    const allItemsReturned = originalPurchase.items.length > 0
+      && originalPurchase.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+    originalPurchase.returnStatus = allItemsReturned
+      ? 'fully_returned'
+      : hasReturnedItems
+        ? 'partially_returned'
+        : 'not_returned';
     await originalPurchase.save({ session, validateBeforeSave: false });
 
     // 9. Handle refund and double-entry alignments via partyLedgerService
@@ -487,35 +492,56 @@ export const cancelPurchaseReturn = async (req, res, next) => {
           (i) => i.product.toString() === item.product.toString()
         );
         if (originalItem) {
-          originalItem.returnedQty = (originalItem.returnedQty || 0) - item.returnQty;
+          originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
       }
-      originalPurchase.returnStatus = originalPurchase.items.some(
-        (i) => (i.returnedQty || 0) > 0
-      ) ? 'partially_returned' : 'not_returned';
+      const hasReturnedItems = originalPurchase.items.some((i) => (i.returnedQty || 0) > 0);
+      const allItemsReturned = originalPurchase.items.length > 0
+        && originalPurchase.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+      originalPurchase.returnStatus = allItemsReturned
+        ? 'fully_returned'
+        : hasReturnedItems
+          ? 'partially_returned'
+          : 'not_returned';
       await originalPurchase.save({ session, validateBeforeSave: false });
     }
 
-    // Reverse refund if any
-    if (purchaseReturn.refundReceivedAmount > 0 && purchaseReturn.cashBankAccountId) {
-      const bankAccount = await BankAccount.findById(
-        purchaseReturn.cashBankAccountId
-      ).session(session);
-      if (bankAccount) {
-        bankAccount.currentBalance -= purchaseReturn.refundReceivedAmount;
-        await bankAccount.save({ session });
+    // Reverse cash/bank transactions and remove their completed movement rows
+    const cashTransactions = await CashBankTransaction.find({ referenceId: purchaseReturn._id, status: 'completed' }).session(session);
+    for (const tx of cashTransactions) {
+      if (tx.accountId) {
+        const bankAccount = await BankAccount.findById(tx.accountId).session(session);
+        if (bankAccount) {
+          if (tx.direction === 'in') {
+            bankAccount.currentBalance -= tx.amount;
+          } else {
+            bankAccount.currentBalance += tx.amount;
+          }
+          await bankAccount.save({ session, validateBeforeSave: false });
+        }
       }
     }
+    await CashBankTransaction.deleteMany({ referenceId: purchaseReturn._id }).session(session);
 
     // Reverse debit balance
     const supplier = await Supplier.findById(purchaseReturn.supplier).session(session);
     if (supplier && purchaseReturn.debitBalance > 0) {
-      supplier.outstandingBalance = (supplier.outstandingBalance || 0) - purchaseReturn.debitBalance;
+      supplier.outstandingBalance = (supplier.outstandingBalance || 0) + purchaseReturn.debitBalance;
       await supplier.save({ session, validateBeforeSave: false });
     }
+    await PartyLedger.deleteMany({ referenceId: purchaseReturn._id }).session(session);
 
     purchaseReturn.status = 'cancelled';
     await purchaseReturn.save({ session });
+
+    if (purchaseReturn.accountingVoucherId) {
+      await cancelVoucher(purchaseReturn.accountingVoucherId, `Purchase return ${purchaseReturn.debitNoteNo} cancelled`, req.user._id, { session });
+      purchaseReturn.accountingVoucherId = undefined;
+      purchaseReturn.accountingPosted = false;
+      purchaseReturn.accountingStatus = 'not_posted';
+      purchaseReturn.accountingError = '';
+      await purchaseReturn.save({ session, validateBeforeSave: false });
+    }
 
     if (session) {
       await session.commitTransaction();
@@ -579,12 +605,17 @@ export const deletePurchaseReturn = async (req, res, next) => {
           (i) => i.product.toString() === item.product.toString()
         );
         if (originalItem) {
-          originalItem.returnedQty = (originalItem.returnedQty || 0) - item.returnQty;
+          originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
       }
-      originalPurchase.returnStatus = originalPurchase.items.some(
-        (i) => (i.returnedQty || 0) > 0
-      ) ? 'partially_returned' : 'not_returned';
+      const hasReturnedItems = originalPurchase.items.some((i) => (i.returnedQty || 0) > 0);
+      const allItemsReturned = originalPurchase.items.length > 0
+        && originalPurchase.items.every((i) => (i.returnedQty || 0) >= i.quantity);
+      originalPurchase.returnStatus = allItemsReturned
+        ? 'fully_returned'
+        : hasReturnedItems
+          ? 'partially_returned'
+          : 'not_returned';
       await originalPurchase.save({ session, validateBeforeSave: false });
     }
 
@@ -609,7 +640,7 @@ export const deletePurchaseReturn = async (req, res, next) => {
     const supplier = await Supplier.findById(purchaseReturn.supplier).session(session);
     if (supplier) {
       if (purchaseReturn.debitBalance > 0) {
-        supplier.outstandingBalance = (supplier.outstandingBalance || 0) - purchaseReturn.debitBalance;
+        supplier.outstandingBalance = (supplier.outstandingBalance || 0) + purchaseReturn.debitBalance;
       }
       if (purchaseReturn.refundReceivedAmount > 0) {
         supplier.totalPurchases = (supplier.totalPurchases || 0) - 1;
@@ -619,6 +650,10 @@ export const deletePurchaseReturn = async (req, res, next) => {
     await PartyLedger.deleteMany({ referenceId: purchaseReturn._id }).session(session);
 
     // 5. Delete the purchase return document
+    if (purchaseReturn.accountingVoucherId) {
+      await cancelVoucher(purchaseReturn.accountingVoucherId, `Purchase return ${purchaseReturn.debitNoteNo} deleted`, req.user._id, { session });
+    }
+
     await PurchaseReturn.findByIdAndDelete(purchaseReturn._id).session(session);
 
     if (session) {

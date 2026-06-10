@@ -18,6 +18,56 @@ import {
   postSaleAccountingVoucher,
 } from '../services/accounting/salesAccounting.service.js';
 import { ensureCustomerAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
+
+const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+const netReceivedAmount = (amountPaid, totalAmount, changeAmount = 0) => {
+  const tendered = Number(amountPaid ?? totalAmount ?? 0);
+  return Math.max(0, Math.min(roundMoney(tendered - Number(changeAmount || 0)), roundMoney(totalAmount || 0)));
+};
+
+const splitTaxAmount = (taxAmount, stateOfSupply) => {
+  const tax = roundMoney(taxAmount);
+  if (tax <= 0) return { cgst: 0, sgst: 0, igst: 0 };
+  const supply = String(stateOfSupply || '').toLowerCase();
+  const isInterState = supply.includes('inter');
+  if (isInterState) return { cgst: 0, sgst: 0, igst: tax };
+  const cgst = roundMoney(tax / 2);
+  return { cgst, sgst: roundMoney(tax - cgst), igst: 0 };
+};
+
+const normalizeSaleItemTax = (item, stateOfSupply) => {
+  const explicitSplit = roundMoney(Number(item.cgstAmount ?? item.cgst ?? 0)
+    + Number(item.sgstAmount ?? item.sgst ?? 0)
+    + Number(item.igstAmount ?? item.igst ?? 0));
+  const itemTax = roundMoney(item.taxAmount ?? explicitSplit);
+  const split = explicitSplit > 0
+    ? {
+      cgst: Number(item.cgstAmount ?? item.cgst ?? 0),
+      sgst: Number(item.sgstAmount ?? item.sgst ?? 0),
+      igst: Number(item.igstAmount ?? item.igst ?? 0),
+    }
+    : splitTaxAmount(itemTax, stateOfSupply);
+  const taxableAmount = roundMoney(item.taxableAmount ?? (Number(item.unitPrice || 0) * Number(item.quantity || 0)));
+  const total = roundMoney(item.total ?? (taxableAmount + itemTax));
+  return { ...split, taxableAmount, taxAmount: itemTax, total };
+};
+
+const normalizeHeaderTax = ({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply }) => {
+  const headerSplit = roundMoney(Number(totalCgst || 0) + Number(totalSgst || 0) + Number(totalIgst || 0));
+  if (headerSplit > 0) {
+    return {
+      totalCgst: roundMoney(totalCgst),
+      totalSgst: roundMoney(totalSgst),
+      totalIgst: roundMoney(totalIgst),
+      taxAmount: roundMoney(taxAmount ?? headerSplit),
+    };
+  }
+  const tax = roundMoney(taxAmount);
+  const split = splitTaxAmount(tax, stateOfSupply);
+  return { totalCgst: split.cgst, totalSgst: split.sgst, totalIgst: split.igst, taxAmount: tax };
+};
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -33,6 +83,7 @@ export const createSale = async (req, res, next) => {
       items,
       customer,
       customerName,
+      stateOfSupply,
       subtotal,
       taxRate,
       taxAmount,
@@ -53,6 +104,8 @@ export const createSale = async (req, res, next) => {
 
     const saleItems = [];
     const invoiceNumber = await generateSequenceNumber('INV', session);
+    const headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
+    const netPaid = netReceivedAmount(amountPaid, totalAmount, changeAmount);
 
     // Deduct stock and validate
     for (const item of items) {
@@ -95,6 +148,7 @@ export const createSale = async (req, res, next) => {
         createdBy: req.user._id
       }, session);
 
+      const itemTax = normalizeSaleItemTax(item, stateOfSupply);
       saleItems.push({
         product: product._id,
         name: product.name,
@@ -105,16 +159,16 @@ export const createSale = async (req, res, next) => {
         profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
         taxRate: item.taxRate || 0,
         gstRate: item.gstRate || item.taxRate || 0,
-        taxableAmount: item.taxableAmount ?? (item.unitPrice * item.quantity),
-        cgst: item.cgst || 0,
-        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
-        sgst: item.sgst || 0,
-        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
-        igst: item.igst || 0,
-        igstAmount: item.igstAmount ?? item.igst ?? 0,
-        taxAmount: item.taxAmount ?? ((Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0))),
+        taxableAmount: itemTax.taxableAmount,
+        cgst: itemTax.cgst,
+        cgstAmount: itemTax.cgst,
+        sgst: itemTax.sgst,
+        sgstAmount: itemTax.sgst,
+        igst: itemTax.igst,
+        igstAmount: itemTax.igst,
+        taxAmount: itemTax.taxAmount,
         hsn: item.hsn || product.hsnCode || product.hsn,
-        total: item.unitPrice * item.quantity,
+        total: itemTax.total,
       });
     }
 
@@ -124,15 +178,16 @@ export const createSale = async (req, res, next) => {
       items: saleItems,
       customer: customer || undefined,
       customerName: customerName || 'Walk-in Customer',
+      stateOfSupply,
       subtotal,
       taxRate: taxRate || 0,
-      taxAmount: taxAmount || 0,
-      totalCgst: totalCgst || 0,
-      cgstAmount: totalCgst || 0,
-      totalSgst: totalSgst || 0,
-      sgstAmount: totalSgst || 0,
-      totalIgst: totalIgst || 0,
-      igstAmount: totalIgst || 0,
+      taxAmount: headerTax.taxAmount,
+      totalCgst: headerTax.totalCgst,
+      cgstAmount: headerTax.totalCgst,
+      totalSgst: headerTax.totalSgst,
+      sgstAmount: headerTax.totalSgst,
+      totalIgst: headerTax.totalIgst,
+      igstAmount: headerTax.totalIgst,
       taxableAmount: Number(subtotal || 0) - Number(discountAmount || 0),
       totalTax: taxAmount || 0,
       discountType: discountType || 'fixed',
@@ -142,7 +197,7 @@ export const createSale = async (req, res, next) => {
       grandTotal: totalAmount,
       paymentMethod,
       paymentStatus: paymentStatus || 'paid',
-      amountPaid: amountPaid || totalAmount,
+      amountPaid: amountPaid ?? totalAmount,
       changeAmount: changeAmount || 0,
       notes,
       cashBankAccountId,
@@ -178,21 +233,21 @@ export const createSale = async (req, res, next) => {
         partyType: 'Customer',
         type: 'sale',
         debitAmount: Number(totalAmount),
-        creditAmount: Number(amountPaid || 0),
+        creditAmount: netPaid,
         referenceId: sale._id,
         receiptNo: invoiceNumber,
-        notes: `Sale Invoice ${invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${amountPaid}`,
+        notes: `Sale Invoice ${invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${netPaid}`,
         date: new Date()
       }, session);
     }
 
     // Log payment in central Cash/Bank transaction log if paid
-    if (sale.amountPaid > 0) {
+    if (netPaid > 0) {
       await createCashBankTransaction({
         date: sale.createdAt || new Date(),
         type: 'sale_payment',
         direction: 'in',
-        amount: sale.amountPaid,
+        amount: netPaid,
         paymentMode: sale.paymentMethod || 'Cash',
         accountType: (sale.paymentMethod === 'Cash' || sale.paymentMethod === 'cash') ? 'cash' : 'bank',
         accountId: sale.cashBankAccountId || undefined,
@@ -423,6 +478,15 @@ export const cancelSale = async (req, res, next) => {
           },
         }
       );
+    }
+
+    if (sale.accountingVoucherId) {
+      await cancelVoucher(sale.accountingVoucherId, `Sale ${sale.invoiceNumber} cancelled`, req.user._id);
+      sale.accountingVoucherId = undefined;
+      sale.accountingPosted = false;
+      sale.accountingStatus = 'not_posted';
+      sale.accountingError = '';
+      await sale.save({ validateBeforeSave: false });
     }
 
     res.status(200).json({
@@ -717,7 +781,7 @@ export const deleteSale = async (req, res, next) => {
           $inc: {
             totalPurchases: -1,
             totalSpent: -sale.totalAmount,
-            walletBalance: -(sale.amountPaid - sale.totalAmount)
+            walletBalance: -(netReceivedAmount(sale.amountPaid, sale.totalAmount, sale.changeAmount) - sale.totalAmount)
           }
         },
         { session }
@@ -743,6 +807,10 @@ export const deleteSale = async (req, res, next) => {
     await CashBankTransaction.deleteMany({ referenceId: sale._id }).session(session);
 
     // 4. Delete sale invoice document
+    if (sale.accountingVoucherId) {
+      await cancelVoucher(sale.accountingVoucherId, `Sale ${sale.invoiceNumber} deleted`, req.user._id, { session });
+    }
+
     await Sale.findByIdAndDelete(sale._id).session(session);
 
     if (session) {
@@ -779,11 +847,13 @@ export const updateSale = async (req, res, next) => {
     if (!sale) {
       return res.status(404).json({ success: false, message: 'Sale not found' });
     }
+    const previousAccountingVoucherId = sale.accountingVoucherId;
 
     const {
       items,
       customer,
       customerName,
+      stateOfSupply,
       subtotal,
       taxRate,
       taxAmount,
@@ -801,6 +871,8 @@ export const updateSale = async (req, res, next) => {
       notes,
       cashBankAccountId,
     } = req.body;
+    const headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
+    const netPaid = netReceivedAmount(amountPaid, totalAmount, changeAmount);
 
     // 1. REVERSAL PHASE (of old sale)
     for (const item of sale.items) {
@@ -825,7 +897,7 @@ export const updateSale = async (req, res, next) => {
           $inc: {
             totalPurchases: -1,
             totalSpent: -sale.totalAmount,
-            walletBalance: -(sale.amountPaid - sale.totalAmount)
+            walletBalance: -(netReceivedAmount(sale.amountPaid, sale.totalAmount, sale.changeAmount) - sale.totalAmount)
           }
         },
         { session }
@@ -891,6 +963,7 @@ export const updateSale = async (req, res, next) => {
         createdBy: req.user._id
       }, session);
 
+      const itemTax = normalizeSaleItemTax(item, stateOfSupply);
       saleItems.push({
         product: product._id,
         name: product.name,
@@ -901,16 +974,16 @@ export const updateSale = async (req, res, next) => {
         profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
         taxRate: item.taxRate || 0,
         gstRate: item.gstRate || item.taxRate || 0,
-        taxableAmount: item.taxableAmount ?? (item.unitPrice * item.quantity),
-        cgst: item.cgst || 0,
-        cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
-        sgst: item.sgst || 0,
-        sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
-        igst: item.igst || 0,
-        igstAmount: item.igstAmount ?? item.igst ?? 0,
-        taxAmount: item.taxAmount ?? ((Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0))),
+        taxableAmount: itemTax.taxableAmount,
+        cgst: itemTax.cgst,
+        cgstAmount: itemTax.cgst,
+        sgst: itemTax.sgst,
+        sgstAmount: itemTax.sgst,
+        igst: itemTax.igst,
+        igstAmount: itemTax.igst,
+        taxAmount: itemTax.taxAmount,
         hsn: item.hsn || product.hsnCode || product.hsn,
-        total: item.unitPrice * item.quantity,
+        total: itemTax.total,
       });
     }
 
@@ -918,15 +991,16 @@ export const updateSale = async (req, res, next) => {
     sale.items = saleItems;
     sale.customer = customer || undefined;
     sale.customerName = customerName || 'Walk-in Customer';
+    sale.stateOfSupply = stateOfSupply;
     sale.subtotal = subtotal;
     sale.taxRate = taxRate || 0;
-    sale.taxAmount = taxAmount || 0;
-    sale.totalCgst = totalCgst || 0;
-    sale.cgstAmount = totalCgst || 0;
-    sale.totalSgst = totalSgst || 0;
-    sale.sgstAmount = totalSgst || 0;
-    sale.totalIgst = totalIgst || 0;
-    sale.igstAmount = totalIgst || 0;
+    sale.taxAmount = headerTax.taxAmount;
+    sale.totalCgst = headerTax.totalCgst;
+    sale.cgstAmount = headerTax.totalCgst;
+    sale.totalSgst = headerTax.totalSgst;
+    sale.sgstAmount = headerTax.totalSgst;
+    sale.totalIgst = headerTax.totalIgst;
+    sale.igstAmount = headerTax.totalIgst;
     sale.taxableAmount = Number(subtotal || 0) - Number(discountAmount || 0);
     sale.totalTax = taxAmount || 0;
     sale.discountType = discountType || 'fixed';
@@ -936,7 +1010,7 @@ export const updateSale = async (req, res, next) => {
     sale.grandTotal = totalAmount;
     sale.paymentMethod = paymentMethod;
     sale.paymentStatus = paymentStatus || 'paid';
-    sale.amountPaid = amountPaid || totalAmount;
+    sale.amountPaid = amountPaid ?? totalAmount;
     sale.changeAmount = changeAmount || 0;
     sale.notes = notes;
     sale.cashBankAccountId = cashBankAccountId;
@@ -961,20 +1035,20 @@ export const updateSale = async (req, res, next) => {
         partyType: 'Customer',
         type: 'sale',
         debitAmount: Number(totalAmount),
-        creditAmount: Number(amountPaid || 0),
+        creditAmount: netPaid,
         referenceId: sale._id,
         receiptNo: sale.invoiceNumber,
-        notes: `Sale Invoice Updated ${sale.invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${amountPaid}`,
+        notes: `Sale Invoice Updated ${sale.invoiceNumber}. Total: ₹${totalAmount}, Paid: ₹${netPaid}`,
         date: new Date()
       }, session);
     }
 
-    if (sale.amountPaid > 0) {
+    if (netPaid > 0) {
       await createCashBankTransaction({
         date: sale.createdAt || new Date(),
         type: 'sale_payment',
         direction: 'in',
-        amount: sale.amountPaid,
+        amount: netPaid,
         paymentMode: sale.paymentMethod || 'Cash',
         accountType: (sale.paymentMethod === 'Cash' || sale.paymentMethod === 'cash') ? 'cash' : 'bank',
         accountId: sale.cashBankAccountId || undefined,
@@ -988,8 +1062,24 @@ export const updateSale = async (req, res, next) => {
       }, session);
     }
 
+    if (previousAccountingVoucherId) {
+      await cancelVoucher(previousAccountingVoucherId, `Sale ${sale.invoiceNumber} updated`, req.user._id, { session });
+      sale.accountingVoucherId = undefined;
+      sale.accountingPosted = false;
+      sale.accountingStatus = 'not_posted';
+      sale.accountingError = '';
+      await sale.save({ session, validateBeforeSave: false });
+    }
+
     if (session) {
       await session.commitTransaction();
+    }
+
+    try {
+      await postSaleAccountingVoucher(sale._id, { createdBy: req.user._id });
+    } catch (accountingError) {
+      await markSaleAccountingFailure(sale._id, accountingError);
+      console.error('[Accounting] Failed to repost updated sale voucher:', accountingError);
     }
 
     // Emit live WebSocket sync

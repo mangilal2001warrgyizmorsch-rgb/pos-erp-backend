@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
 import { createCashBankTransaction, reverseReferenceTransaction } from '../services/cashBankTransactionService.js';
 import { postExpenseAccountingVoucher, markExpenseAccountingFailure } from '../services/accounting/expenseAccounting.service.js';
+import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
 // @desc    Create expense
 // @route   POST /api/expenses
@@ -153,6 +154,59 @@ export const getExpenses = async (req, res, next) => {
   }
 };
 
+// @desc    Get expense summary report
+// @route   GET /api/expenses/reports/summary
+export const getExpenseSummary = async (req, res, next) => {
+  try {
+    const { startDate, endDate, groupBy = 'category' } = req.query;
+    const match = {};
+
+    if (startDate || endDate) {
+      match.date = {};
+      if (startDate) match.date.$gte = new Date(startDate);
+      if (endDate) match.date.$lte = new Date(endDate + 'T23:59:59.999Z');
+    }
+
+    const dateFormat = groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
+    const groupId = groupBy === 'date' || groupBy === 'month'
+      ? { $dateToString: { format: dateFormat, date: '$date' } }
+      : '$category';
+
+    const report = await Expense.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: groupId,
+          totalAmount: { $sum: '$amount' },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    const [summary] = await Expense.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: '$amount' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        report,
+        summary: summary || { totalAmount: 0, count: 0 },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Get single expense
 // @route   GET /api/expenses/:id
 export const getExpense = async (req, res, next) => {
@@ -205,17 +259,23 @@ export const updateExpense = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash expense' });
     }
 
-    // Reverse old cash/bank transaction
-    await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated');
-
     const session = await mongoose.startSession();
     try {
       let expense;
       try {
         await session.withTransaction(async () => {
+          await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated', session);
+          if (oldExpense.accountingVoucherId) {
+            await cancelVoucher(oldExpense.accountingVoucherId, `Expense ${oldExpense.title} updated`, req.user._id, { session });
+          }
+
           const updatePayload = {
             ...req.body,
             categoryName: req.body.category || oldExpense.categoryName,
+            accountingVoucherId: undefined,
+            accountingPosted: false,
+            accountingStatus: 'not_posted',
+            accountingError: '',
           };
           if (req.body.cashBankAccountId !== undefined) {
             updatePayload.cashBankAccountId = String(req.body.cashBankAccountId).trim() === '' ? undefined : req.body.cashBankAccountId;
@@ -255,9 +315,18 @@ export const updateExpense = async (req, res, next) => {
         if (isTxnUnsupported) {
           console.warn('Transactions not supported by MongoDB deployment, falling back to non-transactional expense update.');
 
+          await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated');
+          if (oldExpense.accountingVoucherId) {
+            await cancelVoucher(oldExpense.accountingVoucherId, `Expense ${oldExpense.title} updated`, req.user._id);
+          }
+
           const updatePayload = {
             ...req.body,
             categoryName: req.body.category || oldExpense.categoryName,
+            accountingVoucherId: undefined,
+            accountingPosted: false,
+            accountingStatus: 'not_posted',
+            accountingError: '',
           };
           if (req.body.cashBankAccountId !== undefined) {
             updatePayload.cashBankAccountId = String(req.body.cashBankAccountId).trim() === '' ? undefined : req.body.cashBankAccountId;
@@ -316,6 +385,9 @@ export const deleteExpense = async (req, res, next) => {
 
     // Reverse the cash/bank transaction
     await reverseReferenceTransaction('expense', expense._id, req.user._id, 'Expense deleted');
+    if (expense.accountingVoucherId) {
+      await cancelVoucher(expense.accountingVoucherId, `Expense ${expense.title} deleted`, req.user._id);
+    }
 
     await Expense.findByIdAndDelete(req.params.id);
 

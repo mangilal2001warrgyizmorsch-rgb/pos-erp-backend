@@ -63,7 +63,7 @@ const issue = ({
 const getReferenceVoucher = async (referenceModule, referenceId) => Voucher.findOne({
   referenceModule,
   referenceId,
-  status: { $ne: "CANCELLED" },
+  status: { $nin: ["CANCELLED", "REVERSED"] },
 }).select("_id voucherNo status").lean();
 
 const getOpeningBalanceEquityLedger = async () => {
@@ -438,7 +438,7 @@ export const checkUnbalancedVouchers = async () => {
 export const checkDuplicateVouchers = async () => {
   const modules = ["sale_invoice", "sale", "purchase", "payment_in", "payment_out", "expense", "manual_cash_in", "manual_cash_out", "cash_bank_adjustment", "opening_cash_bank", "bank_transfer", "sale_return", "purchase_return"];
   const duplicates = await Voucher.aggregate([
-    { $match: { referenceModule: { $in: modules }, referenceId: { $ne: null }, status: { $ne: "CANCELLED" } } },
+    { $match: { referenceModule: { $in: modules }, referenceId: { $ne: null }, status: { $nin: ["CANCELLED", "REVERSED"] } } },
     {
       $group: {
         _id: { referenceModule: "$referenceModule", referenceId: "$referenceId", voucherTypeCode: "$voucherTypeCode" },
@@ -934,7 +934,7 @@ export const getPartyReconciliation = async () => {
     const ledger = customer.accountingLedgerId
       ? await Ledger.findOne({ _id: customer.accountingLedgerId, isActive: true }).lean()
       : await Ledger.findOne({ partyId: customer._id, partyType: "customer", isActive: true }).lean();
-    const businessBalance = money(customer.walletBalance || customer.openingBalance || 0);
+    const businessBalance = -money(customer.walletBalance ?? 0);
     const partyLedgerBalance = await latestPartyLedgerBalance(customer._id, "Customer");
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;
     const customerMismatch = accountingBalance !== null && isMismatch(businessBalance, accountingBalance);
@@ -957,8 +957,9 @@ export const getPartyReconciliation = async () => {
     const ledger = supplier.accountingLedgerId
       ? await Ledger.findOne({ _id: supplier.accountingLedgerId, isActive: true }).lean()
       : await Ledger.findOne({ partyId: supplier._id, partyType: "supplier", isActive: true }).lean();
-    const businessBalance = -money(supplier.outstandingBalance || supplier.openingBalance || 0);
-    const partyLedgerBalance = await latestPartyLedgerBalance(supplier._id, "Supplier");
+    const businessBalance = -money(supplier.outstandingBalance ?? 0);
+    const rawPartyLedgerBalance = await latestPartyLedgerBalance(supplier._id, "Supplier");
+    const partyLedgerBalance = rawPartyLedgerBalance === null ? null : -money(rawPartyLedgerBalance);
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;
     const supplierMismatch = accountingBalance !== null && isMismatch(businessBalance, accountingBalance);
     const partyLedgerMismatch = accountingBalance !== null && partyLedgerBalance !== null && isMismatch(partyLedgerBalance, accountingBalance);
