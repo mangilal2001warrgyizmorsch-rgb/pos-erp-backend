@@ -4,6 +4,7 @@ import Ledger from "../../models/accounting/Ledger.model.js";
 import Voucher from "../../models/accounting/Voucher.model.js";
 import Purchase from "../../models/Purchase.js";
 import Supplier from "../../models/Supplier.js";
+import BusinessProfile from "../../models/BusinessProfile.js";
 import {
   LEDGER_TYPES,
   NORMAL_BALANCE,
@@ -216,7 +217,7 @@ export const markPurchaseAccountingFailure = async (purchaseId, error) => {
 const getExistingVoucher = async (purchase, session = null) => {
   if (purchase.accountingVoucherId) {
     const voucher = await queryWithSession(Voucher.findById(purchase.accountingVoucherId), session);
-    if (voucher) return voucher;
+    if (voucher && !["CANCELLED", "REVERSED"].includes(voucher.status)) return voucher;
   }
 
   return queryWithSession(
@@ -234,6 +235,13 @@ const getInputTaxLedgers = async (session = null) => ({
   sgst: await ledgerByCode("INPUT_SGST", session),
   igst: await ledgerByCode("INPUT_IGST", session),
 });
+
+const getGSTContext = async (session = null) => {
+  const profile = await queryWithSession(BusinessProfile.findOne().select("state"), session);
+  return {
+    businessState: profile?.state || "Rajasthan",
+  };
+};
 
 export const postPurchaseAccountingVoucher = async (
   purchaseInput,
@@ -277,6 +285,7 @@ export const postPurchaseAccountingVoucher = async (
   }
 
   const taxBucket = extractGSTAmounts(purchase, purchase.items || [], {
+    ...await getGSTContext(session),
     stateOfSupply: purchase.stateOfSupply,
     partyStateCode: purchase.supplier?.stateCode,
   });
@@ -320,11 +329,7 @@ export const postPurchaseAccountingVoucher = async (
       addEntry(entries, taxLedgers.sgst, money(taxBucket.sgst), 0, `Input SGST on Purchase Bill ${billNo}`);
       addEntry(entries, taxLedgers.igst, money(taxBucket.igst), 0, `Input IGST on Purchase Bill ${billNo}`);
     } else {
-      const fallbackTaxLedger = taxLedgers.igst;
-      if (!fallbackTaxLedger) {
-        throw new Error("Input GST ledger is not configured.");
-      }
-      addEntry(entries, fallbackTaxLedger, taxTotal, 0, `Input GST on Purchase Bill ${billNo}`);
+      throw new Error("Purchase GST cannot be posted because the GST split could not be determined. Set state of supply or CGST/SGST/IGST amounts before posting.");
     }
   }
 

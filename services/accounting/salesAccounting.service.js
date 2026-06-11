@@ -4,6 +4,7 @@ import Ledger from "../../models/accounting/Ledger.model.js";
 import Voucher from "../../models/accounting/Voucher.model.js";
 import Customer from "../../models/Customer.js";
 import Sale from "../../models/Sale.js";
+import BusinessProfile from "../../models/BusinessProfile.js";
 import {
   LEDGER_TYPES,
   NORMAL_BALANCE,
@@ -79,6 +80,13 @@ const requireLedger = async (label, ledgerId, code, ledgerType) => {
     throw new Error(`${label} ledger is not configured.`);
   }
   return ledger;
+};
+
+const getGSTContext = async () => {
+  const profile = await BusinessProfile.findOne().select("state");
+  return {
+    businessState: profile?.state || "Rajasthan",
+  };
 };
 
 export const getOrCreateCustomerLedger = async (customerId, sessionOrCreatedBy = null, maybeCreatedBy = null) => {
@@ -243,6 +251,7 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
   const netPaid = Math.min(money(Number(sale.amountPaid || 0) - Number(sale.changeAmount || 0)), grandTotal);
   const creditAmount = money(grandTotal - netPaid);
   const taxBucket = extractGSTAmounts(sale, sale.items || [], {
+    ...await getGSTContext(),
     stateOfSupply: sale.stateOfSupply,
   });
   const taxSplitTotal = money(taxBucket.cgst) + money(taxBucket.sgst) + money(taxBucket.igst);
@@ -303,11 +312,7 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
       addEntry(entries, taxLedgers.sgst, 0, money(taxBucket.sgst), `${narration} - output SGST`);
       addEntry(entries, taxLedgers.igst, 0, money(taxBucket.igst), `${narration} - output IGST`);
     } else {
-      const fallbackTaxLedger = taxLedgers.igst || taxLedgers.cgst || taxLedgers.sgst;
-      if (!fallbackTaxLedger) {
-        throw new Error("Output GST ledger is not configured.");
-      }
-      addEntry(entries, fallbackTaxLedger, 0, taxTotal, `${narration} - output GST`);
+      throw new Error("Sale GST cannot be posted because the GST split could not be determined. Set state of supply or CGST/SGST/IGST amounts before posting.");
     }
   }
 

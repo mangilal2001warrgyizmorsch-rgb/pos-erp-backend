@@ -30,6 +30,26 @@ const absDiff = (a, b) => Math.abs(money(a) - money(b));
 const isMismatch = (a, b) => absDiff(a, b) > 0.01;
 const idString = (value) => (value ? String(value) : "");
 const shortId = (id) => String(id || "").slice(-8).toUpperCase();
+const startOfDay = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+const endOfDay = (value) => {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return new Date();
+  date.setHours(23, 59, 59, 999);
+  return date;
+};
+const voucherDateMatch = (filters = {}) => {
+  const startDate = startOfDay(filters.startDate);
+  const endDate = endOfDay(filters.endDate);
+  const match = { "voucher.date": { $lte: endDate } };
+  if (startDate) match["voucher.date"].$gte = startDate;
+  return match;
+};
 
 const issue = ({
   type,
@@ -560,15 +580,18 @@ export const checkPartyLedgerMismatch = async () => {
     }));
 };
 
-export const checkGSTMismatch = async () => {
-  const reconciliation = await getGSTReconciliation();
+export const checkGSTMismatch = async (filters = {}) => {
+  const reconciliation = await getGSTReconciliation(filters);
   return reconciliation.mismatches.map((row) => issue({
     type: "GST_MISMATCH",
     severity: "warning",
     module: "gst",
     referenceNo: row.ledgerCode,
-    message: `${row.ledgerCode} report amount differs from accounting ledger.`,
-    suggestedFix: "Review GST report documents and GST ledger postings.",
+    message: `${row.ledgerCode} report amount ${Math.abs(row.expected).toFixed(2)} differs from accounting ledger ${row.actual === null ? "missing" : Math.abs(row.actual).toFixed(2)}.`,
+    suggestedFix: row.status === "missing_ledger"
+      ? "Restore or initialize the missing GST ledger, then repost affected GST documents."
+      : "Open the GST debug report for this tax head and compare source documents with posted GST voucher entries.",
+    suggestedApi: `/api/accounting/gst/debug?ledgerCode=${encodeURIComponent(row.ledgerCode)}`,
     actionType: "FIX_GST_FIELD_MAPPING",
     safeToAutoFix: false,
     details: row,
@@ -819,6 +842,7 @@ export const getCashBankReconciliationDetails = async () => {
 
   for (const account of accounts) {
     const txRows = await CashBankTransaction.find({ accountId: account._id, status: "completed" }).lean();
+    const openingVoucher = await getReferenceVoucher("cash_bank_opening_balance", account._id);
     const comparable = getCashBankComparableBalance(account, txRows);
     const ledgerBalance = account.accountingLedgerId
       ? signedBalance(account.accountingLedgerId.currentBalance, account.accountingLedgerId.currentBalanceType)
@@ -830,7 +854,8 @@ export const getCashBankReconciliationDetails = async () => {
     const difference = ledgerBalance === null ? currentBalance : money(comparable.calculatedCurrentBalance - ledgerBalance);
     const storedBalanceDifference = money(currentBalance - comparable.calculatedCurrentBalance);
     const transactionDifference = ledgerBalance === null ? null : money(comparable.transactionBalance - ledgerBalance);
-    const openingBalanceDifference = ledgerOpeningBalance === null ? null : money(comparable.openingBalance - ledgerOpeningBalance);
+    const ledgerMasterOpeningDifference = ledgerOpeningBalance === null ? null : money(comparable.openingBalance - ledgerOpeningBalance);
+    const openingBalanceDifference = openingVoucher ? null : ledgerMasterOpeningDifference;
     const status = !account.accountingLedgerId
       ? "missing_ledger"
       : (isMismatch(comparable.calculatedCurrentBalance, ledgerBalance) || isMismatch(currentBalance, comparable.calculatedCurrentBalance) ? "mismatch" : "ok");
@@ -840,8 +865,10 @@ export const getCashBankReconciliationDetails = async () => {
       suggestedFix = "Run Link Cash/Bank Ledgers to map this account to an accounting ledger.";
     } else if (Math.abs(storedBalanceDifference) > 0.01) {
       suggestedFix = "Cash/bank stored current balance differs from opening plus non-opening transaction movement. Review cash/bank transaction history before recalculating ledgers.";
-    } else if (openingBalanceDifference && Math.abs(openingBalanceDifference) > 0.01 && Math.abs(difference) <= Math.abs(openingBalanceDifference) + 0.01) {
+    } else if (!openingVoucher && openingBalanceDifference && Math.abs(openingBalanceDifference) > 0.01 && Math.abs(difference) <= Math.abs(openingBalanceDifference) + 0.01) {
       suggestedFix = "Remaining difference appears related to opening balance. Post cash/bank opening balances, then run Recalculate Ledger Balances.";
+    } else if (openingVoucher && ledgerMasterOpeningDifference && Math.abs(ledgerMasterOpeningDifference) > 0.01 && status === "ok") {
+      suggestedFix = "No action required. Opening balance is represented by an opening voucher, so the ledger master opening can remain zero.";
     } else if (status === "mismatch") {
       suggestedFix = "Run Recalculate Ledger Balances, then review missing cash/bank vouchers if the difference remains.";
     }
@@ -873,6 +900,13 @@ export const getCashBankReconciliationDetails = async () => {
       difference,
       transactionDifference,
       openingBalanceDifference,
+      ledgerMasterOpeningDifference,
+      openingVoucher: openingVoucher ? {
+        voucherId: openingVoucher._id,
+        voucherNo: openingVoucher.voucherNo,
+        status: openingVoucher.status,
+      } : null,
+      openingPosted: Boolean(openingVoucher || account.accountingOpeningPosted),
       status,
       suggestedFix,
     });
@@ -918,10 +952,25 @@ export const getCashBankReconciliationDetails = async () => {
   return { checkedAt: new Date(), accounts: rows };
 };
 
-const latestPartyLedgerBalance = async (partyId, partyType) => {
-  const row = await PartyLedger.findOne({ partyId, partyType }).sort({ date: -1, createdAt: -1 }).lean();
-  if (!row) return null;
-  return money(row.balanceAfter);
+const latestPartyLedgerSummary = async (partyId, partyType) => {
+  const [row, count] = await Promise.all([
+    PartyLedger.findOne({ partyId, partyType }).sort({ date: -1, createdAt: -1 }).lean(),
+    PartyLedger.countDocuments({ partyId, partyType }),
+  ]);
+  if (!row) return { balance: null, entryCount: 0, lastEntry: null };
+  return {
+    balance: money(row.balanceAfter),
+    entryCount: count,
+    lastEntry: {
+      entryId: row._id,
+      type: row.type,
+      receiptNo: row.receiptNo,
+      debitAmount: money(row.debitAmount),
+      creditAmount: money(row.creditAmount),
+      balanceAfter: money(row.balanceAfter),
+      date: row.date,
+    },
+  };
 };
 
 export const getPartyReconciliation = async () => {
@@ -935,20 +984,35 @@ export const getPartyReconciliation = async () => {
       ? await Ledger.findOne({ _id: customer.accountingLedgerId, isActive: true }).lean()
       : await Ledger.findOne({ partyId: customer._id, partyType: "customer", isActive: true }).lean();
     const businessBalance = -money(customer.walletBalance ?? 0);
-    const partyLedgerBalance = await latestPartyLedgerBalance(customer._id, "Customer");
+    const partyLedger = await latestPartyLedgerSummary(customer._id, "Customer");
+    const partyLedgerBalance = partyLedger.balance;
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;
     const customerMismatch = accountingBalance !== null && isMismatch(businessBalance, accountingBalance);
     const partyLedgerMismatch = accountingBalance !== null && partyLedgerBalance !== null && isMismatch(partyLedgerBalance, accountingBalance);
+    const missingPartyLedgerHistory = partyLedgerBalance === null
+      && (Math.abs(businessBalance) > 0.01 || (accountingBalance !== null && Math.abs(accountingBalance) > 0.01));
     customerRows.push({
       partyId: customer._id,
       partyType: "customer",
       partyName: customer.name,
       businessBalance,
       partyLedgerBalance,
+      partyLedgerEntryCount: partyLedger.entryCount,
+      lastPartyLedgerEntry: partyLedger.lastEntry,
       accountingBalance,
       difference: accountingBalance === null ? businessBalance : money(businessBalance - accountingBalance),
-      status: !ledger ? "missing_accounting_ledger" : (customerMismatch || partyLedgerMismatch ? "mismatch" : "ok"),
-      suggestedFix: !ledger ? "Create missing customer accounting ledgers using the reconciliation fix action." : "Review customer ledger entries, then repost missing sale/payment accounting if needed.",
+      status: !ledger
+        ? "missing_accounting_ledger"
+        : missingPartyLedgerHistory
+          ? "missing_party_ledger_history"
+          : (customerMismatch || partyLedgerMismatch ? "mismatch" : "ok"),
+      suggestedFix: !ledger
+        ? "Create missing customer accounting ledgers using the reconciliation fix action."
+        : missingPartyLedgerHistory
+          ? "No party ledger history exists yet. Rebuild or seed party ledger entries before treating this party as fully reconciled."
+          : customerMismatch || partyLedgerMismatch
+            ? "Review customer ledger entries, then repost missing sale/payment accounting if needed."
+            : "No action required.",
       suggestedApi: !ledger ? "/api/accounting/reconciliation/parties/link-ledgers" : undefined,
     });
   }
@@ -958,28 +1022,43 @@ export const getPartyReconciliation = async () => {
       ? await Ledger.findOne({ _id: supplier.accountingLedgerId, isActive: true }).lean()
       : await Ledger.findOne({ partyId: supplier._id, partyType: "supplier", isActive: true }).lean();
     const businessBalance = -money(supplier.outstandingBalance ?? 0);
-    const rawPartyLedgerBalance = await latestPartyLedgerBalance(supplier._id, "Supplier");
+    const partyLedger = await latestPartyLedgerSummary(supplier._id, "Supplier");
+    const rawPartyLedgerBalance = partyLedger.balance;
     const partyLedgerBalance = rawPartyLedgerBalance === null ? null : -money(rawPartyLedgerBalance);
     const accountingBalance = ledger ? signedBalance(ledger.currentBalance, ledger.currentBalanceType) : null;
     const supplierMismatch = accountingBalance !== null && isMismatch(businessBalance, accountingBalance);
     const partyLedgerMismatch = accountingBalance !== null && partyLedgerBalance !== null && isMismatch(partyLedgerBalance, accountingBalance);
+    const missingPartyLedgerHistory = partyLedgerBalance === null
+      && (Math.abs(businessBalance) > 0.01 || (accountingBalance !== null && Math.abs(accountingBalance) > 0.01));
     supplierRows.push({
       partyId: supplier._id,
       partyType: "supplier",
       partyName: supplier.name,
       businessBalance,
       partyLedgerBalance,
+      partyLedgerEntryCount: partyLedger.entryCount,
+      lastPartyLedgerEntry: partyLedger.lastEntry,
       accountingBalance,
       difference: accountingBalance === null ? businessBalance : money(businessBalance - accountingBalance),
-      status: !ledger ? "missing_accounting_ledger" : (supplierMismatch || partyLedgerMismatch ? "mismatch" : "ok"),
-      suggestedFix: !ledger ? "Create missing supplier accounting ledgers using the reconciliation fix action." : "Review supplier ledger entries, then repost missing purchase/payment accounting if needed.",
+      status: !ledger
+        ? "missing_accounting_ledger"
+        : missingPartyLedgerHistory
+          ? "missing_party_ledger_history"
+          : (supplierMismatch || partyLedgerMismatch ? "mismatch" : "ok"),
+      suggestedFix: !ledger
+        ? "Create missing supplier accounting ledgers using the reconciliation fix action."
+        : missingPartyLedgerHistory
+          ? "No party ledger history exists yet. Rebuild or seed party ledger entries before treating this party as fully reconciled."
+          : supplierMismatch || partyLedgerMismatch
+            ? "Review supplier ledger entries, then repost missing purchase/payment accounting if needed."
+            : "No action required.",
       suggestedApi: !ledger ? "/api/accounting/reconciliation/parties/link-ledgers" : undefined,
     });
   }
   return { checkedAt: new Date(), customers: customerRows, suppliers: supplierRows };
 };
 
-const gstLedgerBalance = async (code) => {
+const gstLedgerBalance = async (code, filters = {}) => {
   const ledger = await Ledger.findOne({ code }).lean();
   if (!ledger) return null;
   const totals = await VoucherEntry.aggregate([
@@ -987,6 +1066,7 @@ const gstLedgerBalance = async (code) => {
     { $lookup: { from: "vouchers", localField: "voucherId", foreignField: "_id", as: "voucher" } },
     { $unwind: "$voucher" },
     { $match: { "voucher.status": "POSTED" } },
+    { $match: voucherDateMatch(filters) },
     { $group: { _id: "$ledgerId", debit: { $sum: "$debit" }, credit: { $sum: "$credit" } } },
   ]);
   const total = totals[0] || { debit: 0, credit: 0 };
@@ -997,6 +1077,7 @@ const gstLedgerBalance = async (code) => {
     debit: money(total.debit),
     credit: money(total.credit),
     signed: money(total.debit - total.credit),
+    balanceType: money(total.debit - total.credit) < 0 ? "CREDIT" : "DEBIT",
   };
 };
 
@@ -1061,6 +1142,10 @@ export const linkPartyAccountingLedgers = async ({ userId = null } = {}) => {
 
 export const getGSTReconciliation = async (filters = {}) => {
   const summary = await getGSTSummary(filters);
+  const period = {
+    startDate: startOfDay(filters.startDate),
+    endDate: endOfDay(filters.endDate),
+  };
   const expected = {
     OUTPUT_CGST: -money(summary.outputGST.cgst),
     OUTPUT_SGST: -money(summary.outputGST.sgst),
@@ -1071,19 +1156,22 @@ export const getGSTReconciliation = async (filters = {}) => {
   };
   const rows = [];
   for (const code of Object.keys(expected)) {
-    const ledger = await gstLedgerBalance(code);
+    const ledger = await gstLedgerBalance(code, filters);
     const actual = ledger?.signed ?? null;
     rows.push({
       ledgerCode: code,
       expected: expected[code],
       actual,
       difference: actual === null ? expected[code] : money(expected[code] - actual),
+      expectedType: expected[code] < 0 ? "CREDIT" : "DEBIT",
+      actualType: actual === null ? null : actual < 0 ? "CREDIT" : "DEBIT",
       status: actual === null ? "missing_ledger" : (isMismatch(expected[code], actual) ? "mismatch" : "ok"),
       ledger,
     });
   }
   return {
     checkedAt: new Date(),
+    period,
     outputGST: summary.outputGST,
     inputGST: summary.inputGST,
     rows,

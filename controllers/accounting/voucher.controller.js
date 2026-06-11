@@ -200,6 +200,30 @@ export const repostPurchaseAccountingController = async (req, res) => {
       return res.status(404).json({ success: false, message: "Purchase not found" });
     }
 
+    let existingVoucher = purchase.accountingVoucherId
+      ? await Voucher.findById(purchase.accountingVoucherId)
+      : null;
+    if (!existingVoucher || ["CANCELLED", "REVERSED"].includes(existingVoucher.status)) {
+      existingVoucher = await Voucher.findOne({
+        referenceModule: "purchase",
+        referenceId: purchase._id,
+        status: { $nin: ["CANCELLED", "REVERSED"] },
+      });
+    }
+
+    if (existingVoucher && !["CANCELLED", "REVERSED"].includes(existingVoucher.status)) {
+      await cancelVoucher(
+        existingVoucher._id,
+        `Purchase ${purchase.purchaseNumber || purchase.invoiceNumber || purchase._id} reposted`,
+        req.user?._id,
+      );
+      purchase.accountingVoucherId = undefined;
+      purchase.accountingPosted = false;
+      purchase.accountingStatus = "not_posted";
+      purchase.accountingError = undefined;
+      await purchase.save();
+    }
+
     const result = await postPurchaseAccountingVoucher(purchase, {
       createdBy: req.user?._id,
       source: "purchase_bill",

@@ -5,6 +5,7 @@ import Purchase from "../../models/Purchase.js";
 import PurchaseReturn from "../../models/PurchaseReturn.js";
 import Sale from "../../models/Sale.js";
 import SalesReturn from "../../models/SalesReturn.js";
+import BusinessProfile from "../../models/BusinessProfile.js";
 import Voucher from "../../models/accounting/Voucher.model.js";
 import VoucherEntry from "../../models/accounting/VoucherEntry.model.js";
 import {
@@ -48,13 +49,21 @@ const getGSTSettings = async () => {
   };
 };
 
+const getGSTContext = async () => {
+  const profile = await BusinessProfile.findOne().select("state").lean();
+  return {
+    businessState: profile?.state || "Rajasthan",
+  };
+};
+
 const itemTaxable = (item) => {
   const qty = Number(item.quantity || item.returnQty || 0);
   const price = Number(item.unitPrice || item.purchasePrice || item.pricePerUnit || 0);
   return roundMoney(Math.max(0, qty * price - Number(item.discountAmount || 0)));
 };
 
-const docTaxBucket = (doc) => extractGSTAmounts(doc, doc.items || [], {
+const docTaxBucket = (doc, context = {}) => extractGSTAmounts(doc, doc.items || [], {
+  ...context,
   stateOfSupply: doc.stateOfSupply,
   partyStateCode: doc.customer?.stateCode || doc.supplier?.stateCode,
 });
@@ -112,10 +121,10 @@ const getProductMap = async (docs) => {
 
 export const getOutputGSTReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const sales = await getSalesDocs(filters);
+  const [sales, gstContext] = await Promise.all([getSalesDocs(filters), getGSTContext()]);
   const rows = sales.map((sale) => {
     const customerGSTIN = normalizeGSTIN(sale.customer?.gstNumber);
-    const bucket = docTaxBucket(sale);
+    const bucket = docTaxBucket(sale, gstContext);
     return {
       date: sale.createdAt,
       invoiceNo: sale.invoiceNumber,
@@ -142,10 +151,10 @@ export const getOutputGSTReport = async (filters = {}) => {
 
 export const getInputGSTReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const purchases = await getPurchaseDocs(filters);
+  const [purchases, gstContext] = await Promise.all([getPurchaseDocs(filters), getGSTContext()]);
   const rows = purchases.map((purchase) => {
     const supplierGSTIN = normalizeGSTIN(purchase.supplier?.gstNumber);
-    const bucket = docTaxBucket(purchase);
+    const bucket = docTaxBucket(purchase, gstContext);
     return {
       date: purchase.purchaseDate,
       billNo: purchase.purchaseNumber,
@@ -264,7 +273,7 @@ const buildGSTVoucherPostings = async (vouchers = []) => {
 
 export const getGSTDebugReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const [sales, purchases] = await Promise.all([getSalesDocs(filters), getPurchaseDocs(filters)]);
+  const [sales, purchases, gstContext] = await Promise.all([getSalesDocs(filters), getPurchaseDocs(filters), getGSTContext()]);
   const referenceQuery = [];
   if (sales.length) referenceQuery.push({ referenceModule: "sale_invoice", referenceId: { $in: sales.map((doc) => doc._id) } });
   if (purchases.length) referenceQuery.push({ referenceModule: "purchase", referenceId: { $in: purchases.map((doc) => doc._id) } });
@@ -275,7 +284,7 @@ export const getGSTDebugReport = async (filters = {}) => {
   const { postingsByVoucher, ledgerByCode } = await buildGSTVoucherPostings(vouchers);
 
   const buildRows = (docs, docType) => docs.map((doc) => {
-    const bucket = docTaxBucket(doc);
+    const bucket = docTaxBucket(doc, gstContext);
     const partyName = docType === "sale"
       ? doc.customerName || doc.customer?.name || "Walk-in Customer"
       : doc.supplierName || doc.supplier?.name || "Supplier";
@@ -417,9 +426,10 @@ export const getGSTPayableSummary = async (filters = {}) => {
 export const getHSNSummary = async (filters = {}) => {
   const settings = await getGSTSettings();
   const type = filters.type || "both";
-  const [sales, purchases] = await Promise.all([
+  const [sales, purchases, gstContext] = await Promise.all([
     type !== "purchase" ? getSalesDocs(filters) : [],
     type !== "sales" ? getPurchaseDocs(filters) : [],
+    getGSTContext(),
   ]);
   const productMap = await getProductMap([...sales, ...purchases]);
   const grouped = new Map();
@@ -447,7 +457,7 @@ export const getHSNSummary = async (filters = {}) => {
       }
       const row = grouped.get(key);
       const taxable = itemTaxable(item);
-      const bucket = extractGSTAmounts({}, [item]);
+      const bucket = extractGSTAmounts({ stateOfSupply: doc.stateOfSupply }, [item], gstContext);
       row.quantity = roundMoney(row.quantity + Number(item.quantity || 0));
       row.taxableValue = roundMoney(row.taxableValue + taxable);
       row.cgst = roundMoney(row.cgst + bucket.cgst);
@@ -534,7 +544,7 @@ export const getGSTLedgerReport = async (filters = {}) => {
 
 export const getGSTPartyWiseReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const [sales, purchases] = await Promise.all([getSalesDocs(filters), getPurchaseDocs(filters)]);
+  const [sales, purchases, gstContext] = await Promise.all([getSalesDocs(filters), getPurchaseDocs(filters), getGSTContext()]);
   const partyType = filters.partyType || "all";
   const rows = [];
   if (partyType !== "supplier") {
@@ -542,7 +552,7 @@ export const getGSTPartyWiseReport = async (filters = {}) => {
       partyType: "customer",
       partyName: sale.customerName || sale.customer?.name || "Walk-in Customer",
       gstin: normalizeGSTIN(sale.customer?.gstNumber),
-      ...docTaxBucket(sale),
+      ...docTaxBucket(sale, gstContext),
     }));
   }
   if (partyType !== "customer") {
@@ -550,7 +560,7 @@ export const getGSTPartyWiseReport = async (filters = {}) => {
       partyType: "supplier",
       partyName: purchase.supplierName || purchase.supplier?.name || "Supplier",
       gstin: normalizeGSTIN(purchase.supplier?.gstNumber),
-      ...docTaxBucket(purchase),
+      ...docTaxBucket(purchase, gstContext),
     }));
   }
   return { reportName: "GST Party-wise Report", period: getPeriod(filters), ...settings, rows };
