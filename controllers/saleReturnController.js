@@ -17,6 +17,15 @@ import { postSaleReturnAccountingVoucher } from '../services/accounting/returnAc
 import { emitSocketEvent } from '../utils/socket.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
+const returnItemAffectsInventory = (item) => item.affectsInventory !== false
+  && (item.itemType || 'inventory') === 'inventory'
+  && Boolean(item.product);
+
+const findOriginalSaleItem = (sale, returnItem) => sale.items.find(
+  (item) => (returnItem.saleItemId && String(item._id) === String(returnItem.saleItemId))
+    || (returnItem.product && item.product && item.product.toString() === returnItem.product.toString())
+);
+
 // @desc    Create Sale Return / Credit Note
 // @route   POST /api/sales-returns
 export const createSaleReturn = async (req, res, next) => {
@@ -108,6 +117,9 @@ export const createSaleReturn = async (req, res, next) => {
 
       validatedItems.push({
         product: item.product,
+        saleItemId: item.saleItemId,
+        itemType: item.itemType || (item.product ? 'inventory' : 'non_stock_product'),
+        affectsInventory: item.affectsInventory !== undefined ? Boolean(item.affectsInventory) : Boolean(item.product),
         barcode: item.barcode || '',
         itemName: item.itemName,
         soldQty: item.soldQty,
@@ -171,7 +183,7 @@ export const createSaleReturn = async (req, res, next) => {
 
     // 7. Process stock returns using transaction-safe inventoryService
     for (const item of validatedItems) {
-      if (item.stockAction === 'restore_stock') {
+      if (returnItemAffectsInventory(item) && item.stockAction === 'restore_stock') {
         await inventoryService.restoreStock({
           productId: item.product,
           quantity: item.returnQty,
@@ -180,7 +192,7 @@ export const createSaleReturn = async (req, res, next) => {
           notes: `Sale Return via Credit Note ${creditNoteNo}`,
           createdBy: req.user._id
         }, session);
-      } else {
+      } else if (returnItemAffectsInventory(item)) {
         // Log movement for damaged returns without increasing available sales inventory
         const product = await Product.findById(item.product).session(session);
         if (product) {
@@ -202,9 +214,7 @@ export const createSaleReturn = async (req, res, next) => {
 
     // 8. Update original sale invoice return status
     for (const item of validatedItems) {
-      const originalItem = originalSale.items.find(
-        (i) => i.product.toString() === item.product.toString()
-      );
+      const originalItem = findOriginalSaleItem(originalSale, item);
       if (originalItem) {
         originalItem.returnedQty = (originalItem.returnedQty || 0) + item.returnQty;
       }
@@ -490,6 +500,8 @@ export const cancelSaleReturn = async (req, res, next) => {
 
     // Reverse stock movements
     for (const item of saleReturn.items) {
+      if (!returnItemAffectsInventory(item)) continue;
+
       const product = await Product.findById(item.product).session(session);
       if (product) {
         if (item.stockAction === 'restore_stock') {
@@ -503,9 +515,7 @@ export const cancelSaleReturn = async (req, res, next) => {
     const originalSale = await Sale.findById(saleReturn.sale).session(session);
     if (originalSale) {
       for (const item of saleReturn.items) {
-        const originalItem = originalSale.items.find(
-          (i) => i.product.toString() === item.product.toString()
-        );
+        const originalItem = findOriginalSaleItem(originalSale, item);
         if (originalItem) {
           originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
@@ -597,6 +607,8 @@ export const deleteSaleReturn = async (req, res, next) => {
 
     // 1. Reverse stock movements
     for (const item of saleReturn.items) {
+      if (!returnItemAffectsInventory(item)) continue;
+
       const product = await Product.findById(item.product).session(session);
       if (product) {
         if (item.stockAction === 'restore_stock') {
@@ -618,9 +630,7 @@ export const deleteSaleReturn = async (req, res, next) => {
     const originalSale = await Sale.findById(saleReturn.sale).session(session);
     if (originalSale) {
       for (const item of saleReturn.items) {
-        const originalItem = originalSale.items.find(
-          (i) => i.product.toString() === item.product.toString()
-        );
+        const originalItem = findOriginalSaleItem(originalSale, item);
         if (originalItem) {
           originalItem.returnedQty = Math.max(0, (originalItem.returnedQty || 0) - item.returnQty);
         }
@@ -743,25 +753,36 @@ export const getReturnableItemsFromSale = async (req, res, next) => {
     const returnedMap = {};
     for (const returnRecord of returnedItems) {
       for (const item of returnRecord.items) {
-        const key = item.product.toString();
+        const key = item.saleItemId?.toString() || item.product?.toString();
+        if (!key) continue;
         returnedMap[key] = (returnedMap[key] || 0) + item.returnQty;
       }
     }
 
     // Calculate returnable items
-    const returnableItems = sale.items.map((item) => ({
-      product: item.product._id,
-      itemName: item.name,
-      barcode: item.sku,
-      soldQty: item.quantity,
-      alreadyReturnedQty: returnedMap[item.product._id.toString()] || 0,
-      returnableQty: item.quantity - (returnedMap[item.product._id.toString()] || 0),
-      unit: 'piece',
-      pricePerUnit: item.unitPrice,
-      discountAmount: (sale.discountAmount / sale.subtotal) * (item.unitPrice * item.quantity),
-      taxPercent: item.taxRate || 0,
-      reason: 'Other',
-    }));
+    const returnableItems = sale.items.map((item) => {
+      const saleItemKey = item._id?.toString();
+      const productKey = item.product?._id?.toString();
+      const alreadyReturnedQty = returnedMap[saleItemKey] || returnedMap[productKey] || 0;
+      const affectsInventory = item.affectsInventory !== false && (item.itemType || 'inventory') === 'inventory' && Boolean(item.product);
+      return {
+        product: item.product?._id,
+        saleItemId: item._id,
+        itemType: item.itemType || 'inventory',
+        affectsInventory,
+        itemName: item.itemName || item.name,
+        barcode: item.sku,
+        soldQty: item.quantity,
+        alreadyReturnedQty,
+        returnableQty: item.quantity - alreadyReturnedQty,
+        unit: 'piece',
+        pricePerUnit: item.unitPrice,
+        discountAmount: sale.subtotal ? (sale.discountAmount / sale.subtotal) * (item.unitPrice * item.quantity) : 0,
+        taxPercent: item.taxRate || 0,
+        stockAction: affectsInventory ? 'restore_stock' : 'no_stock',
+        reason: 'Other',
+      };
+    });
 
     res.status(200).json({
       success: true,

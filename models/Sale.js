@@ -4,15 +4,35 @@ const saleItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: true,
+    required: function () {
+      return this.itemType === 'inventory';
+    },
+  },
+  itemType: {
+    type: String,
+    enum: ['inventory', 'non_stock_product', 'service'],
+    default: 'inventory',
+  },
+  affectsInventory: {
+    type: Boolean,
+    default: function () {
+      return this.itemType === 'inventory';
+    },
   },
   name: {
     type: String,
     required: true,
   },
+  itemName: {
+    type: String,
+  },
+  description: {
+    type: String,
+    trim: true,
+  },
   sku: {
     type: String,
-    required: true,
+    default: '',
   },
   quantity: {
     type: Number,
@@ -28,9 +48,17 @@ const saleItemSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  rate: {
+    type: Number,
+    default: 0,
+  },
+  discount: {
+    type: Number,
+    default: 0,
+  },
   purchasePrice: {
     type: Number,
-    required: true,
+    default: 0,
   },
   profitAmount: {
     type: Number,
@@ -79,6 +107,10 @@ const saleItemSchema = new mongoose.Schema({
   hsn: {
     type: String,
     trim: true,
+  },
+  incomeLedger: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Ledger',
   },
   total: {
     type: Number,

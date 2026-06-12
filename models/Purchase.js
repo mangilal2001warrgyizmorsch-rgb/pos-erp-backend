@@ -14,6 +14,24 @@ const purchaseItemSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  barcode: {
+    type: String,
+    trim: true,
+    default: '',
+  },
+  itemName: {
+    type: String,
+    trim: true,
+  },
+  productName: {
+    type: String,
+    trim: true,
+  },
+  unit: {
+    type: String,
+    enum: ["piece", "kg", "liter", "meter", "box", "dozen"],
+    default: "piece",
+  },
   quantity: {
     type: Number,
     required: true,
@@ -69,6 +87,10 @@ const purchaseItemSchema = new mongoose.Schema({
     default: 0,
   },
   hsn: {
+    type: String,
+    trim: true,
+  },
+  hsnCode: {
     type: String,
     trim: true,
   },

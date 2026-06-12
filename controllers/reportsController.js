@@ -90,11 +90,24 @@ const purchaseMatch = (query, startDate, endDate) => {
   return match;
 };
 
-const soldItemsWithProductStages = (query) => {
+const soldItemsWithProductStages = (query, { inventoryOnly = false } = {}) => {
   const category = toObjectId(query.category);
   const product = toObjectId(query.product);
   const stages = [
     { $unwind: '$items' },
+  ];
+
+  if (inventoryOnly) {
+    stages.push({
+      $match: {
+        'items.product': { $ne: null },
+        'items.affectsInventory': { $ne: false },
+        'items.itemType': { $in: [null, 'inventory'] },
+      },
+    });
+  }
+
+  stages.push(
     {
       $lookup: {
         from: 'products',
@@ -104,7 +117,7 @@ const soldItemsWithProductStages = (query) => {
       },
     },
     { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
-  ];
+  );
 
   if (product || category) {
     const match = {};
@@ -243,7 +256,7 @@ export const getInventoryReport = async (req, res, next) => {
       ]),
       Sale.aggregate([
         { $match: saleMatch(req.query, startDate, endDate) },
-        ...soldItemsWithProductStages(req.query),
+        ...soldItemsWithProductStages(req.query, { inventoryOnly: true }),
         {
           $group: {
             _id: '$items.product',
@@ -372,7 +385,7 @@ export const getSalesReport = async (req, res, next) => {
         {
           $group: {
             _id: null,
-            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$product.purchasePrice', 0] }] } },
+            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.purchasePrice', { $ifNull: ['$product.purchasePrice', 0] }] }] } },
             itemRevenue: { $sum: '$items.total' },
           },
         },
@@ -388,7 +401,7 @@ export const getSalesReport = async (req, res, next) => {
           $group: {
             _id: { $dateToString: { format: groupFormat, date: '$createdAt' } },
             totalSales: { $sum: '$items.total' },
-            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$product.purchasePrice', 0] }] } },
+            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.purchasePrice', { $ifNull: ['$product.purchasePrice', 0] }] }] } },
             totalDiscounts: { $sum: '$discountAmount' },
             totalTax: { $sum: '$taxAmount' },
             orders: { $addToSet: '$_id' },
@@ -445,7 +458,7 @@ export const getSalesReport = async (req, res, next) => {
             category: { $first: { $ifNull: ['$category.name', 'Uncategorized'] } },
             quantitySold: { $sum: '$items.quantity' },
             totalSales: { $sum: '$items.total' },
-            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$product.purchasePrice', 0] }] } },
+            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.purchasePrice', { $ifNull: ['$product.purchasePrice', 0] }] }] } },
           },
         },
         { $sort: { totalSales: -1 } },
@@ -455,12 +468,16 @@ export const getSalesReport = async (req, res, next) => {
         ...soldItemsWithProductStages(req.query),
         {
           $group: {
-            _id: '$items.product',
+            _id: {
+              product: '$items.product',
+              itemName: '$items.name',
+              itemType: { $ifNull: ['$items.itemType', 'inventory'] },
+            },
             productName: { $first: '$items.name' },
             sku: { $first: '$items.sku' },
             quantitySold: { $sum: '$items.quantity' },
             totalSales: { $sum: '$items.total' },
-            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$product.purchasePrice', 0] }] } },
+            purchaseCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.purchasePrice', { $ifNull: ['$product.purchasePrice', 0] }] }] } },
           },
         },
         { $sort: { quantitySold: -1 } },
@@ -538,7 +555,7 @@ export const getSalesReport = async (req, res, next) => {
           if (reportItems.length === 0) return null;
 
           const itemCost = reportItems.reduce(
-            (sum, item) => sum + item.quantity * (item.product?.purchasePrice || 0),
+            (sum, item) => sum + item.quantity * (item.purchasePrice ?? item.product?.purchasePrice ?? 0),
             0
           );
           const itemTotal = reportItems.reduce((sum, item) => sum + item.total, 0);

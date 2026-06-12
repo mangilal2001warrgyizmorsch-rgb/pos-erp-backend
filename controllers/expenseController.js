@@ -1,34 +1,81 @@
 import mongoose from 'mongoose';
 import Expense from '../models/Expense.js';
+import AccountGroup from '../models/accounting/AccountGroup.model.js';
+import Ledger from '../models/accounting/Ledger.model.js';
 import { createCashBankTransaction, reverseReferenceTransaction } from '../services/cashBankTransactionService.js';
-import { postExpenseAccountingVoucher, markExpenseAccountingFailure } from '../services/accounting/expenseAccounting.service.js';
+import { postIncomeExpenseAccountingVoucher, markExpenseAccountingFailure, getOrCreateIncomeExpenseLedger } from '../services/accounting/expenseAccounting.service.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
+import { createAuditLog } from '../services/auditLog.service.js';
 
-// @desc    Create expense
+const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+/**
+ * Calculate GST amounts from base amount and rate
+ */
+const calculateGSTAmounts = (amount, gstRate, gstApplicable) => {
+  const baseAmount = Number(amount) || 0;
+  if (!gstApplicable || !gstRate || gstRate <= 0) {
+    return {
+      taxableAmount: baseAmount,
+      gstAmount: 0,
+      totalAmount: baseAmount,
+    };
+  }
+  const taxableAmount = roundMoney(baseAmount);
+  const gstAmount = roundMoney(taxableAmount * (gstRate / 100));
+  const totalAmount = roundMoney(taxableAmount + gstAmount);
+  return { taxableAmount, gstAmount, totalAmount };
+};
+
+// @desc    Create expense or income entry
 // @route   POST /api/expenses
 export const createExpense = async (req, res, next) => {
   try {
-    const { amount, paymentMethod, cashBankAccountId, title } = req.body;
+    const { amount, paymentMethod, cashBankAccountId, title, entryType, nature } = req.body;
     if (!title || amount === undefined) {
       return res.status(400).json({ success: false, message: 'Title and amount are required' });
     }
     if (Number(amount) <= 0) {
       return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
     }
-    if (paymentMethod && paymentMethod !== 'cash' && !cashBankAccountId) {
-      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash expense' });
+
+    const pMethod = paymentMethod || 'cash';
+    const accountId = (req.body.cashBankAccountId && String(req.body.cashBankAccountId).trim() !== '')
+      ? req.body.cashBankAccountId
+      : (req.body.paymentAccountId && String(req.body.paymentAccountId).trim() !== '')
+        ? req.body.paymentAccountId
+        : undefined;
+
+    if (pMethod !== 'cash' && !accountId) {
+      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash payment' });
     }
 
-    const cashBankAccountIdClean = (req.body.cashBankAccountId && String(req.body.cashBankAccountId).trim() !== '')
-      ? req.body.cashBankAccountId
-      : undefined;
+    // Calculate GST amounts
+    const gstApplicable = req.body.gstApplicable || false;
+    const gstRate = gstApplicable ? (Number(req.body.gstRate) || 0) : 0;
+    const gstAmounts = calculateGSTAmounts(amount, gstRate, gstApplicable);
 
     const expenseData = {
       ...req.body,
-      categoryName: req.body.category, // since it's a string
-      cashBankAccountId: cashBankAccountIdClean,
+      entryType: entryType || 'expense',
+      nature: nature || 'indirect',
+      amount: Number(amount),
+      categoryName: req.body.ledgerName || req.body.category || req.body.title,
+      category: req.body.ledgerName || req.body.category || '',
+      cashBankAccountId: accountId,
+      paymentAccountId: accountId,
+      gstApplicable,
+      gstRate,
+      taxableAmount: gstAmounts.taxableAmount,
+      gstAmount: gstAmounts.gstAmount,
+      totalAmount: gstAmounts.totalAmount,
+      status: 'active',
       createdBy: req.user._id,
     };
+
+    const isIncome = expenseData.entryType === 'income';
+    const direction = isIncome ? 'in' : 'out';
+    const txType = isIncome ? 'income' : 'expense';
 
     // Use a DB transaction when accounting auto-posting is enabled to ensure atomicity
     const session = await mongoose.startSession();
@@ -43,21 +90,21 @@ export const createExpense = async (req, res, next) => {
           const accountType = createdExpense.paymentMethod === 'cash' ? 'cash' : 'bank';
           await createCashBankTransaction({
             date: createdExpense.date || new Date(),
-            type: 'expense',
-            direction: 'out',
-            amount: createdExpense.amount,
+            type: txType,
+            direction,
+            amount: createdExpense.totalAmount || createdExpense.amount,
             paymentMode: createdExpense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
             accountType,
             accountId: createdExpense.cashBankAccountId || undefined,
-            description: createdExpense.description || `Expense: ${createdExpense.title}`,
-            referenceModule: 'expense',
+            description: createdExpense.description || `${isIncome ? 'Income' : 'Expense'}: ${createdExpense.title}`,
+            referenceModule: txType,
             referenceId: createdExpense._id,
             referenceNo: createdExpense.reference || undefined,
             createdBy: req.user._id
           }, session);
 
-          // Attempt accounting posting (will be skipped if accounting disabled)
-          await postExpenseAccountingVoucher(createdExpense, { createdBy: req.user._id }, { session });
+          // Attempt accounting posting
+          await postIncomeExpenseAccountingVoucher(createdExpense, { createdBy: req.user._id }, { session });
         });
       } catch (err) {
         const message = String(err?.message || "");
@@ -66,30 +113,29 @@ export const createExpense = async (req, res, next) => {
 
         if (isTxnUnsupported) {
           // Fallback to non-transactional flow for standalone MongoDB
-          console.warn('Transactions not supported by MongoDB deployment, falling back to non-transactional expense create.');
+          console.warn('Transactions not supported, falling back to non-transactional create.');
           createdExpense = await Expense.create(expenseData);
 
           const accountType = createdExpense.paymentMethod === 'cash' ? 'cash' : 'bank';
           await createCashBankTransaction({
             date: createdExpense.date || new Date(),
-            type: 'expense',
-            direction: 'out',
-            amount: createdExpense.amount,
+            type: txType,
+            direction,
+            amount: createdExpense.totalAmount || createdExpense.amount,
             paymentMode: createdExpense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
             accountType,
             accountId: createdExpense.cashBankAccountId || undefined,
-            description: createdExpense.description || `Expense: ${createdExpense.title}`,
-            referenceModule: 'expense',
+            description: createdExpense.description || `${isIncome ? 'Income' : 'Expense'}: ${createdExpense.title}`,
+            referenceModule: txType,
             referenceId: createdExpense._id,
             referenceNo: createdExpense.reference || undefined,
             createdBy: req.user._id
           });
 
-          // Try accounting posting without session
           try {
-            await postExpenseAccountingVoucher(createdExpense, { createdBy: req.user._id });
+            await postIncomeExpenseAccountingVoucher(createdExpense, { createdBy: req.user._id });
           } catch (acctErr) {
-            console.error('Expense accounting posting failed (standalone fallback):', acctErr);
+            console.error('Accounting posting failed (standalone fallback):', acctErr);
             await markExpenseAccountingFailure(createdExpense._id, acctErr);
           }
         } else {
@@ -97,15 +143,23 @@ export const createExpense = async (req, res, next) => {
         }
       }
 
+      // Audit log
+      await createAuditLog({
+        userId: req.user._id,
+        action: isIncome ? 'INCOME_CREATED' : 'EXPENSE_CREATED',
+        module: 'expense',
+        referenceId: createdExpense._id,
+        description: `${isIncome ? 'Income' : 'Expense'} created: ${createdExpense.title} - ₹${createdExpense.totalAmount || createdExpense.amount}`,
+      });
+
       res.status(201).json({ success: true, data: createdExpense });
     } catch (err) {
-      // If posting failed inside transaction, try to mark failure (best-effort outside txn)
       try {
         if (err?.expenseId) {
           await markExpenseAccountingFailure(err.expenseId, err);
         }
       } catch (inner) {
-        console.error('Failed to mark expense accounting failure:', inner);
+        console.error('Failed to mark accounting failure:', inner);
       }
       throw err;
     } finally {
@@ -116,20 +170,45 @@ export const createExpense = async (req, res, next) => {
   }
 };
 
-// @desc    Get all expenses
+// @desc    Get all expenses/income entries
 // @route   GET /api/expenses
 export const getExpenses = async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, category, startDate, endDate } = req.query;
+    const { page = 1, limit = 20, category, startDate, endDate, entryType, nature, status, search, ledgerId } = req.query;
 
     const query = {};
 
+    // Filter by entry type
+    if (entryType && entryType !== 'all') query.entryType = entryType;
+
+    // Filter by nature
+    if (nature && nature !== 'all') query.nature = nature;
+
+    // Filter by status - default to active only
+    if (status && status !== 'all') {
+      query.status = status;
+    } else {
+      query.status = { $ne: 'cancelled' };
+    }
+
     if (category) query.category = category;
+    if (ledgerId) query.ledgerId = ledgerId;
 
     if (startDate || endDate) {
       query.date = {};
       if (startDate) query.date.$gte = new Date(startDate);
       if (endDate) query.date.$lte = new Date(endDate + 'T23:59:59.999Z');
+    }
+
+    if (search) {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      query.$or = [
+        { title: searchRegex },
+        { description: searchRegex },
+        { ledgerName: searchRegex },
+        { categoryName: searchRegex },
+        { reference: searchRegex },
+      ];
     }
 
     const total = await Expense.countDocuments(query);
@@ -158,8 +237,10 @@ export const getExpenses = async (req, res, next) => {
 // @route   GET /api/expenses/reports/summary
 export const getExpenseSummary = async (req, res, next) => {
   try {
-    const { startDate, endDate, groupBy = 'category' } = req.query;
-    const match = {};
+    const { startDate, endDate, groupBy = 'category', entryType } = req.query;
+    const match = { status: { $ne: 'cancelled' } };
+
+    if (entryType && entryType !== 'all') match.entryType = entryType;
 
     if (startDate || endDate) {
       match.date = {};
@@ -168,16 +249,23 @@ export const getExpenseSummary = async (req, res, next) => {
     }
 
     const dateFormat = groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
-    const groupId = groupBy === 'date' || groupBy === 'month'
-      ? { $dateToString: { format: dateFormat, date: '$date' } }
-      : '$category';
+    let groupId;
+    if (groupBy === 'date' || groupBy === 'month') {
+      groupId = { $dateToString: { format: dateFormat, date: '$date' } };
+    } else if (groupBy === 'entryType') {
+      groupId = { entryType: '$entryType', nature: '$nature' };
+    } else {
+      groupId = '$category';
+    }
 
     const report = await Expense.aggregate([
       { $match: match },
       {
         $group: {
           _id: groupId,
-          totalAmount: { $sum: '$amount' },
+          totalAmount: { $sum: '$totalAmount' },
+          taxableAmount: { $sum: '$taxableAmount' },
+          gstAmount: { $sum: '$gstAmount' },
           count: { $sum: 1 },
         },
       },
@@ -189,7 +277,9 @@ export const getExpenseSummary = async (req, res, next) => {
       {
         $group: {
           _id: null,
-          totalAmount: { $sum: '$amount' },
+          totalAmount: { $sum: '$totalAmount' },
+          taxableAmount: { $sum: '$taxableAmount' },
+          gstAmount: { $sum: '$gstAmount' },
           count: { $sum: 1 },
         },
       },
@@ -199,7 +289,7 @@ export const getExpenseSummary = async (req, res, next) => {
       success: true,
       data: {
         report,
-        summary: summary || { totalAmount: 0, count: 0 },
+        summary: summary || { totalAmount: 0, taxableAmount: 0, gstAmount: 0, count: 0 },
       },
     });
   } catch (error) {
@@ -217,7 +307,7 @@ export const getExpense = async (req, res, next) => {
     if (!expense) {
       return res.status(404).json({
         success: false,
-        message: 'Expense not found',
+        message: 'Entry not found',
       });
     }
 
@@ -230,7 +320,7 @@ export const getExpense = async (req, res, next) => {
   }
 };
 
-// @desc    Update expense
+// @desc    Update expense/income
 // @route   PUT /api/expenses/:id
 export const updateExpense = async (req, res, next) => {
   try {
@@ -238,16 +328,18 @@ export const updateExpense = async (req, res, next) => {
     if (!oldExpense) {
       return res.status(404).json({
         success: false,
-        message: 'Expense not found',
+        message: 'Entry not found',
       });
     }
 
     const title = req.body.title !== undefined ? req.body.title : oldExpense.title;
     const amount = req.body.amount !== undefined ? req.body.amount : oldExpense.amount;
     const paymentMethod = req.body.paymentMethod !== undefined ? req.body.paymentMethod : oldExpense.paymentMethod;
-    const cashBankAccountId = (req.body.cashBankAccountId !== undefined && String(req.body.cashBankAccountId).trim() !== '')
+    const accountId = (req.body.cashBankAccountId !== undefined && String(req.body.cashBankAccountId).trim() !== '')
       ? req.body.cashBankAccountId
-      : oldExpense.cashBankAccountId;
+      : (req.body.paymentAccountId !== undefined && String(req.body.paymentAccountId).trim() !== '')
+        ? req.body.paymentAccountId
+        : oldExpense.cashBankAccountId;
 
     if (!title || amount === undefined) {
       return res.status(400).json({ success: false, message: 'Title and amount are required' });
@@ -255,31 +347,49 @@ export const updateExpense = async (req, res, next) => {
     if (Number(amount) <= 0) {
       return res.status(400).json({ success: false, message: 'Amount must be greater than 0' });
     }
-    if (paymentMethod && paymentMethod !== 'cash' && !cashBankAccountId) {
-      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash expense' });
+    if (paymentMethod && paymentMethod !== 'cash' && !accountId) {
+      return res.status(400).json({ success: false, message: 'Please select a bank account for non-cash payment' });
     }
+
+    // Calculate GST amounts
+    const gstApplicable = req.body.gstApplicable !== undefined ? req.body.gstApplicable : oldExpense.gstApplicable;
+    const gstRate = gstApplicable ? (Number(req.body.gstRate ?? oldExpense.gstRate) || 0) : 0;
+    const gstAmounts = calculateGSTAmounts(amount, gstRate, gstApplicable);
+
+    const entryType = req.body.entryType || oldExpense.entryType || 'expense';
+    const isIncome = entryType === 'income';
+    const direction = isIncome ? 'in' : 'out';
+    const txType = isIncome ? 'income' : 'expense';
+    const oldTxType = (oldExpense.entryType || 'expense') === 'income' ? 'income' : 'expense';
 
     const session = await mongoose.startSession();
     try {
       let expense;
       try {
         await session.withTransaction(async () => {
-          await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated', session);
+          // Reverse old transaction
+          await reverseReferenceTransaction(oldTxType, oldExpense._id, req.user._id, 'Entry updated', session);
           if (oldExpense.accountingVoucherId) {
-            await cancelVoucher(oldExpense.accountingVoucherId, `Expense ${oldExpense.title} updated`, req.user._id, { session });
+            await cancelVoucher(oldExpense.accountingVoucherId, `Entry ${oldExpense.title} updated`, req.user._id, { session });
           }
 
           const updatePayload = {
             ...req.body,
-            categoryName: req.body.category || oldExpense.categoryName,
+            entryType,
+            nature: req.body.nature || oldExpense.nature || 'indirect',
+            categoryName: req.body.ledgerName || req.body.category || oldExpense.categoryName,
+            cashBankAccountId: String(accountId || '').trim() === '' ? undefined : accountId,
+            paymentAccountId: String(accountId || '').trim() === '' ? undefined : accountId,
+            gstApplicable,
+            gstRate,
+            taxableAmount: gstAmounts.taxableAmount,
+            gstAmount: gstAmounts.gstAmount,
+            totalAmount: gstAmounts.totalAmount,
             accountingVoucherId: undefined,
             accountingPosted: false,
             accountingStatus: 'not_posted',
             accountingError: '',
           };
-          if (req.body.cashBankAccountId !== undefined) {
-            updatePayload.cashBankAccountId = String(req.body.cashBankAccountId).trim() === '' ? undefined : req.body.cashBankAccountId;
-          }
 
           expense = await Expense.findByIdAndUpdate(req.params.id, updatePayload, {
             new: true,
@@ -287,25 +397,25 @@ export const updateExpense = async (req, res, next) => {
             session,
           });
 
-          // Create central cash bank transaction log and update balance
+          // Create cash bank transaction with new values
           const accountType = expense.paymentMethod === 'cash' ? 'cash' : 'bank';
           await createCashBankTransaction({
             date: expense.date || new Date(),
-            type: 'expense',
-            direction: 'out',
-            amount: expense.amount,
+            type: txType,
+            direction,
+            amount: expense.totalAmount || expense.amount,
             paymentMode: expense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
             accountType,
             accountId: expense.cashBankAccountId || undefined,
-            description: expense.description || `Expense: ${expense.title}`,
-            referenceModule: 'expense',
+            description: expense.description || `${isIncome ? 'Income' : 'Expense'}: ${expense.title}`,
+            referenceModule: txType,
             referenceId: expense._id,
             referenceNo: expense.reference || undefined,
             createdBy: req.user._id
           }, session);
 
-          // Attempt accounting posting for updated expense
-          await postExpenseAccountingVoucher(expense, { createdBy: req.user._id }, { session });
+          // Attempt accounting posting for updated entry
+          await postIncomeExpenseAccountingVoucher(expense, { createdBy: req.user._id }, { session });
         });
       } catch (err) {
         const message = String(err?.message || "");
@@ -313,53 +423,68 @@ export const updateExpense = async (req, res, next) => {
           || message.includes("This MongoDB deployment does not support retryable writes");
 
         if (isTxnUnsupported) {
-          console.warn('Transactions not supported by MongoDB deployment, falling back to non-transactional expense update.');
+          console.warn('Transactions not supported, falling back to non-transactional update.');
 
-          await reverseReferenceTransaction('expense', oldExpense._id, req.user._id, 'Expense updated');
+          await reverseReferenceTransaction(oldTxType, oldExpense._id, req.user._id, 'Entry updated');
           if (oldExpense.accountingVoucherId) {
-            await cancelVoucher(oldExpense.accountingVoucherId, `Expense ${oldExpense.title} updated`, req.user._id);
+            await cancelVoucher(oldExpense.accountingVoucherId, `Entry ${oldExpense.title} updated`, req.user._id);
           }
 
           const updatePayload = {
             ...req.body,
-            categoryName: req.body.category || oldExpense.categoryName,
+            entryType,
+            nature: req.body.nature || oldExpense.nature || 'indirect',
+            categoryName: req.body.ledgerName || req.body.category || oldExpense.categoryName,
+            cashBankAccountId: String(accountId || '').trim() === '' ? undefined : accountId,
+            paymentAccountId: String(accountId || '').trim() === '' ? undefined : accountId,
+            gstApplicable,
+            gstRate,
+            taxableAmount: gstAmounts.taxableAmount,
+            gstAmount: gstAmounts.gstAmount,
+            totalAmount: gstAmounts.totalAmount,
             accountingVoucherId: undefined,
             accountingPosted: false,
             accountingStatus: 'not_posted',
             accountingError: '',
           };
-          if (req.body.cashBankAccountId !== undefined) {
-            updatePayload.cashBankAccountId = String(req.body.cashBankAccountId).trim() === '' ? undefined : req.body.cashBankAccountId;
-          }
 
           expense = await Expense.findByIdAndUpdate(req.params.id, updatePayload, { new: true, runValidators: true });
 
           const accountType = expense.paymentMethod === 'cash' ? 'cash' : 'bank';
           await createCashBankTransaction({
             date: expense.date || new Date(),
-            type: 'expense',
-            direction: 'out',
-            amount: expense.amount,
+            type: txType,
+            direction,
+            amount: expense.totalAmount || expense.amount,
             paymentMode: expense.paymentMethod === 'cash' ? 'Cash' : 'Bank',
             accountType,
             accountId: expense.cashBankAccountId || undefined,
-            description: expense.description || `Expense: ${expense.title}`,
-            referenceModule: 'expense',
+            description: expense.description || `${isIncome ? 'Income' : 'Expense'}: ${expense.title}`,
+            referenceModule: txType,
             referenceId: expense._id,
             referenceNo: expense.reference || undefined,
             createdBy: req.user._id
           });
 
           try {
-            await postExpenseAccountingVoucher(expense, { createdBy: req.user._id });
+            await postIncomeExpenseAccountingVoucher(expense, { createdBy: req.user._id });
           } catch (acctErr) {
-            console.error('Expense accounting posting failed (standalone fallback update):', acctErr);
+            console.error('Accounting posting failed (standalone fallback update):', acctErr);
             await markExpenseAccountingFailure(expense._id, acctErr);
           }
         } else {
           throw err;
         }
       }
+
+      // Audit log
+      await createAuditLog({
+        userId: req.user._id,
+        action: isIncome ? 'INCOME_UPDATED' : 'EXPENSE_UPDATED',
+        module: 'expense',
+        referenceId: expense._id,
+        description: `${isIncome ? 'Income' : 'Expense'} updated: ${expense.title}`,
+      });
 
       res.status(200).json({ success: true, data: expense });
     } finally {
@@ -370,7 +495,7 @@ export const updateExpense = async (req, res, next) => {
   }
 };
 
-// @desc    Delete expense
+// @desc    Delete/Cancel expense
 // @route   DELETE /api/expenses/:id
 export const deleteExpense = async (req, res, next) => {
   try {
@@ -379,22 +504,88 @@ export const deleteExpense = async (req, res, next) => {
     if (!expense) {
       return res.status(404).json({
         success: false,
-        message: 'Expense not found',
+        message: 'Entry not found',
       });
     }
 
+    const isIncome = (expense.entryType || 'expense') === 'income';
+    const txType = isIncome ? 'income' : 'expense';
+
     // Reverse the cash/bank transaction
-    await reverseReferenceTransaction('expense', expense._id, req.user._id, 'Expense deleted');
+    await reverseReferenceTransaction(txType, expense._id, req.user._id, 'Entry deleted');
     if (expense.accountingVoucherId) {
-      await cancelVoucher(expense.accountingVoucherId, `Expense ${expense.title} deleted`, req.user._id);
+      await cancelVoucher(expense.accountingVoucherId, `${isIncome ? 'Income' : 'Expense'} ${expense.title} deleted`, req.user._id);
     }
 
-    await Expense.findByIdAndDelete(req.params.id);
+    // Soft delete: mark as cancelled
+    expense.status = 'cancelled';
+    expense.accountingPosted = false;
+    expense.accountingStatus = 'not_posted';
+    await expense.save();
+
+    // Audit log
+    await createAuditLog({
+      userId: req.user._id,
+      action: isIncome ? 'INCOME_DELETED' : 'EXPENSE_DELETED',
+      module: 'expense',
+      referenceId: expense._id,
+      description: `${isIncome ? 'Income' : 'Expense'} cancelled: ${expense.title} - ₹${expense.totalAmount || expense.amount}`,
+    });
 
     res.status(200).json({
       success: true,
-      message: 'Expense deleted successfully',
+      message: 'Entry deleted successfully',
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get ledgers by group code for dropdown
+// @route   GET /api/expenses/ledgers
+export const getExpenseLedgers = async (req, res, next) => {
+  try {
+    const { group } = req.query;
+    if (!group) {
+      return res.status(400).json({ success: false, message: 'Group code is required' });
+    }
+
+    const accountGroup = await AccountGroup.findOne({ code: group, isActive: true });
+    if (!accountGroup) {
+      return res.status(404).json({ success: false, message: 'Account group not found' });
+    }
+
+    const ledgers = await Ledger.find({ groupId: accountGroup._id, isActive: true })
+      .select('name code ledgerType')
+      .sort({ name: 1 });
+
+    res.status(200).json({ success: true, data: ledgers });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Quick create a ledger under correct group
+// @route   POST /api/expenses/ledgers/quick-create
+export const quickCreateLedger = async (req, res, next) => {
+  try {
+    const { name, groupCode, entryType, nature } = req.body;
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Ledger name is required' });
+    }
+
+    const resolvedEntryType = entryType || 'expense';
+    const resolvedNature = nature || 'indirect';
+
+    const ledger = await getOrCreateIncomeExpenseLedger(
+      name,
+      resolvedEntryType,
+      resolvedNature,
+      null,
+      req.user._id,
+    );
+
+    res.status(201).json({ success: true, data: ledger });
   } catch (error) {
     next(error);
   }

@@ -82,6 +82,111 @@ const requireLedger = async (label, ledgerId, code, ledgerType) => {
   return ledger;
 };
 
+const getOrCreateServiceIncomeLedger = async (settings, incomeLedgerId = null, createdBy = null) => {
+  const selectedLedger = incomeLedgerId
+    ? await ledgerByIdOrCode(incomeLedgerId, null, LEDGER_TYPES.INCOME)
+    : null;
+  if (selectedLedger) return selectedLedger;
+
+  const configuredLedger = await ledgerByIdOrCode(
+    settings.defaultServiceIncomeLedgerId,
+    "SERVICE_INCOME",
+    LEDGER_TYPES.INCOME,
+  );
+  if (configuredLedger) return configuredLedger;
+
+  const group = await AccountGroup.findOne({ code: "INDIRECT_INCOME", isActive: true });
+  if (!group) {
+    throw new Error("Indirect Income account group is not configured.");
+  }
+
+  return createLedgerDocument({
+    name: "Service Income A/c",
+    code: "SERVICE_INCOME",
+    groupId: group._id,
+    ledgerType: LEDGER_TYPES.INCOME,
+    openingBalance: 0,
+    openingBalanceType: NORMAL_BALANCE.CREDIT,
+    currentBalance: 0,
+    currentBalanceType: NORMAL_BALANCE.CREDIT,
+    isActive: true,
+    isSystemDefault: true,
+    createdBy,
+  });
+};
+
+const itemRevenueAmount = (item) => {
+  const explicitTaxable = Number(item.taxableAmount);
+  if (Number.isFinite(explicitTaxable) && explicitTaxable > 0) return money(explicitTaxable);
+
+  const total = Number(item.total || 0);
+  const splitTax = Number(item.cgstAmount ?? item.cgst ?? 0)
+    + Number(item.sgstAmount ?? item.sgst ?? 0)
+    + Number(item.igstAmount ?? item.igst ?? 0);
+  const tax = splitTax > 0 ? splitTax : Number(item.taxAmount || 0);
+  if (total > 0) return money(total - tax);
+
+  const qty = Number(item.quantity || 0);
+  const rate = Number(item.unitPrice || item.rate || 0);
+  const discount = Number(item.discount || item.discountAmount || 0);
+  return money((qty * rate) - discount);
+};
+
+const addRevenueBucket = async (buckets, key, ledger, amount) => {
+  const normalized = money(amount);
+  if (normalized <= 0) return;
+  const existing = buckets.get(key);
+  if (existing) {
+    existing.amount = money(existing.amount + normalized);
+    return;
+  }
+  buckets.set(key, { ledger, amount: normalized });
+};
+
+const getRevenueBuckets = async (sale, settings, salesLedger, discountAmount, hasDiscountLedger, createdBy) => {
+  const buckets = new Map();
+
+  for (const item of sale.items || []) {
+    const amount = itemRevenueAmount(item);
+    if (amount <= 0) continue;
+
+    if (item.itemType === "service") {
+      const serviceLedger = await getOrCreateServiceIncomeLedger(settings, item.incomeLedger, createdBy);
+      await addRevenueBucket(buckets, `service:${serviceLedger._id}`, serviceLedger, amount);
+    } else {
+      await addRevenueBucket(buckets, `sales:${salesLedger._id}`, salesLedger, amount);
+    }
+  }
+
+  if (buckets.size === 0) {
+    await addRevenueBucket(
+      buckets,
+      `sales:${salesLedger._id}`,
+      salesLedger,
+      Number(sale.subtotal || 0) - (hasDiscountLedger ? 0 : discountAmount),
+    );
+    return buckets;
+  }
+
+  if (!hasDiscountLedger && discountAmount > 0) {
+    const bucketTotal = Array.from(buckets.values()).reduce((sum, bucket) => sum + bucket.amount, 0);
+    if (bucketTotal <= 0) return buckets;
+
+    let remainingDiscount = discountAmount;
+    const bucketValues = Array.from(buckets.values());
+
+    bucketValues.forEach((bucket, index) => {
+      const discountShare = index === bucketValues.length - 1
+        ? remainingDiscount
+        : money((bucket.amount / bucketTotal) * discountAmount);
+      bucket.amount = money(bucket.amount - discountShare);
+      remainingDiscount = money(remainingDiscount - discountShare);
+    });
+  }
+
+  return buckets;
+};
+
 const getGSTContext = async () => {
   const profile = await BusinessProfile.findOne().select("state");
   return {
@@ -268,8 +373,9 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
     ? await ledgerByIdOrCode(settings.defaultDiscountGivenLedgerId, "DISCOUNT_GIVEN", LEDGER_TYPES.DISCOUNT)
     : null;
   const discountDebit = discountLedger ? discountAmount : 0;
-  const salesCredit = money(Number(sale.subtotal || 0) - (discountLedger ? 0 : discountAmount));
-  const residual = roundMoney(grandTotal + discountDebit - salesCredit - taxTotal);
+  const revenueBuckets = await getRevenueBuckets(sale, settings, salesLedger, discountAmount, Boolean(discountLedger), createdBy);
+  const revenueCreditTotal = money(Array.from(revenueBuckets.values()).reduce((sum, bucket) => sum + bucket.amount, 0));
+  const residual = roundMoney(grandTotal + discountDebit - revenueCreditTotal - taxTotal);
   const roundOffLedger = Math.abs(residual) > 0.009
     ? await requireLedger("Round off", settings.defaultRoundOffLedgerId, "ROUND_OFF", LEDGER_TYPES.ROUND_OFF)
     : null;
@@ -298,7 +404,10 @@ export const postSaleAccountingVoucher = async (saleInput, { createdBy } = {}) =
     addEntry(entries, discountLedger, discountDebit, 0, `${narration} - discount given`);
   }
 
-  addEntry(entries, salesLedger, 0, salesCredit, `${narration} - sales`);
+  for (const bucket of revenueBuckets.values()) {
+    const label = String(bucket.ledger._id) === String(salesLedger._id) ? "sales" : "service income";
+    addEntry(entries, bucket.ledger, 0, bucket.amount, `${narration} - ${label}`);
+  }
 
   if (taxTotal > 0) {
     const taxLedgers = {

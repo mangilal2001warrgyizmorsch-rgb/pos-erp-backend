@@ -302,7 +302,11 @@ export const getSalesAnalytics = async (req, res, next) => {
       { $unwind: '$items' },
       {
         $group: {
-          _id: '$items.product',
+          _id: {
+            product: '$items.product',
+            itemName: '$items.name',
+            itemType: { $ifNull: ['$items.itemType', 'inventory'] },
+          },
           productName: { $first: '$items.name' },
           productSku: { $first: '$items.sku' },
           quantity: { $sum: '$items.quantity' },
@@ -773,4 +777,3 @@ export const getCashFlowAnalytics = async (req, res, next) => {
     next(error);
   }
 };
-

@@ -131,6 +131,14 @@ export const defaultAccountGroups = [
     affectsGrossProfit: true,
   },
   {
+    name: "Direct Income",
+    code: "DIRECT_INCOME",
+    parentCode: "INCOME",
+    nature: ACCOUNT_NATURE.INCOME,
+    normalBalance: NORMAL_BALANCE.CREDIT,
+    affectsGrossProfit: true,
+  },
+  {
     name: "Indirect Income",
     code: "INDIRECT_INCOME",
     parentCode: "INCOME",
@@ -203,6 +211,12 @@ export const defaultLedgerDefinitions = [
     code: "SALES",
     groupCode: "SALES_ACCOUNTS",
     ledgerType: LEDGER_TYPES.SALES,
+  },
+  {
+    name: "Service Income A/c",
+    code: "SERVICE_INCOME",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
   },
   {
     name: "Purchase A/c",
@@ -294,6 +308,106 @@ export const defaultLedgerDefinitions = [
     groupCode: "INDIRECT_EXPENSES",
     ledgerType: LEDGER_TYPES.EXPENSE,
   },
+  // Direct Expense ledgers
+  {
+    name: "Freight Inward A/c",
+    code: "FREIGHT_INWARD",
+    groupCode: "DIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Labour Charges A/c",
+    code: "LABOUR_CHARGES",
+    groupCode: "DIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Loading Charges A/c",
+    code: "LOADING_CHARGES",
+    groupCode: "DIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  // Indirect Expense ledgers
+  {
+    name: "Office Expenses A/c",
+    code: "OFFICE_EXPENSES",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Office Stationery A/c",
+    code: "OFFICE_STATIONERY",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Rent A/c",
+    code: "RENT",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Salary A/c",
+    code: "SALARY",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Electricity Expense A/c",
+    code: "ELECTRICITY_EXPENSE",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Internet Expense A/c",
+    code: "INTERNET_EXPENSE",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  {
+    name: "Marketing Expense A/c",
+    code: "MARKETING_EXPENSE",
+    groupCode: "INDIRECT_EXPENSES",
+    ledgerType: LEDGER_TYPES.EXPENSE,
+  },
+  // Direct Income ledgers
+  {
+    name: "Job Work Income A/c",
+    code: "JOB_WORK_INCOME",
+    groupCode: "DIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
+  {
+    name: "Processing Income A/c",
+    code: "PROCESSING_INCOME",
+    groupCode: "DIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
+  // Indirect Income ledgers
+  {
+    name: "Commission Income A/c",
+    code: "COMMISSION_INCOME",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
+  {
+    name: "Interest Received A/c",
+    code: "INTEREST_RECEIVED",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
+  {
+    name: "Other Income A/c",
+    code: "OTHER_INCOME",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
+  {
+    name: "Round Off Income A/c",
+    code: "ROUND_OFF_INCOME",
+    groupCode: "INDIRECT_INCOME",
+    ledgerType: LEDGER_TYPES.INCOME,
+  },
   {
     name: "Cash Adjustment A/c",
     code: "CASH_ADJUSTMENT",
@@ -319,6 +433,7 @@ export const defaultVoucherTypes = [
   { name: "Credit Note", code: ACCOUNTING_VOUCHER_TYPES.CREDIT_NOTE, prefix: "CN-" },
   { name: "Debit Note", code: ACCOUNTING_VOUCHER_TYPES.DEBIT_NOTE, prefix: "DN-" },
   { name: "Expense", code: ACCOUNTING_VOUCHER_TYPES.EXPENSE, prefix: "EXP-" },
+  { name: "Income", code: ACCOUNTING_VOUCHER_TYPES.INCOME, prefix: "INC-" },
   { name: "Stock Journal", code: ACCOUNTING_VOUCHER_TYPES.STOCK_JOURNAL, prefix: "STJ-" },
 ];
 
@@ -567,6 +682,7 @@ export const initializeAccountingSettings = async () => {
         "CASH",
         "PRIMARY_BANK",
         "SALES",
+        "SERVICE_INCOME",
         "PURCHASE",
         "SALES_RETURN",
         "PURCHASE_RETURN",
@@ -583,6 +699,7 @@ export const initializeAccountingSettings = async () => {
     defaultCashLedgerId: ledgersByCode.CASH?._id,
     defaultBankLedgerId: ledgersByCode.PRIMARY_BANK?._id,
     defaultSalesLedgerId: ledgersByCode.SALES?._id,
+    defaultServiceIncomeLedgerId: ledgersByCode.SERVICE_INCOME?._id,
     defaultPurchaseLedgerId: ledgersByCode.PURCHASE?._id,
     defaultSalesReturnLedgerId: ledgersByCode.SALES_RETURN?._id,
     defaultPurchaseReturnLedgerId: ledgersByCode.PURCHASE_RETURN?._id,

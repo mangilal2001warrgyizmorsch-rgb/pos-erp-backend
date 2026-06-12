@@ -66,8 +66,21 @@ export const categoryValidator = [
 // Sale validators
 export const saleValidator = [
   body('items').isArray({ min: 1 }).withMessage('At least one item is required'),
-  body('items.*.product').notEmpty().withMessage('Product ID is required for each item'),
-  body('items.*.quantity').isInt({ min: 1 }).withMessage('Valid quantity is required for each item'),
+  body('items.*.itemType')
+    .optional()
+    .isIn(['inventory', 'non_stock_product', 'service'])
+    .withMessage('Valid item type is required for each item'),
+  body('items.*').custom((item) => {
+    const itemType = item.itemType || 'inventory';
+    if (itemType === 'inventory' && !item.product) {
+      throw new Error('Product ID is required for inventory items');
+    }
+    if (itemType !== 'inventory' && !String(item.itemName || item.name || '').trim()) {
+      throw new Error('Item name is required for custom items');
+    }
+    return true;
+  }),
+  body('items.*.quantity').isFloat({ min: 0.000001 }).withMessage('Valid quantity is required for each item'),
   body('subtotal').isFloat({ min: 0 }).withMessage('Valid subtotal is required'),
   body('totalAmount').isFloat({ min: 0 }).withMessage('Valid total amount is required'),
   body('paymentMethod').isIn(['cash', 'card', 'upi']).withMessage('Valid payment method is required'),
@@ -77,7 +90,14 @@ export const saleValidator = [
 // Purchase validators
 export const purchaseValidator = [
   body('items').isArray({ min: 1 }).withMessage('At least one item is required'),
-  body('items.*.product').notEmpty().withMessage('Product ID is required for each item'),
+  body('items.*').custom((item) => {
+    const product = item.product || item.productId;
+    const productName = String(item.itemName || item.productName || item.name || '').trim();
+    if (!product && !productName) {
+      throw new Error('Product name is required when product is not selected');
+    }
+    return true;
+  }),
   body('items.*.quantity').isInt({ min: 1 }).withMessage('Valid quantity is required for each item'),
   body('supplier').notEmpty().withMessage('Supplier ID is required'),
   body('subtotal').isFloat({ min: 0 }).withMessage('Valid subtotal is required'),

@@ -17,6 +17,39 @@ import { recordStockMovement } from '../utils/stockMovement.js';
 import { markPurchaseAccountingFailure, postPurchaseAccountingVoucher } from '../services/accounting/purchaseAccounting.service.js';
 import { ensureSupplierAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
+import { findOrCreateProductFromLineItem } from '../utils/productLineItem.js';
+
+const productSummary = (product, source) => ({
+  productId: product._id,
+  name: product.name,
+  barcode: product.barcode,
+  hsnCode: product.hsnCode,
+  source,
+});
+
+const resolvePurchaseItemProduct = async (item, session, productTracking) => {
+  const result = await findOrCreateProductFromLineItem(item, 'purchase', session);
+  const product = result.product;
+  const summary = productSummary(product, 'purchase');
+  const id = product._id.toString();
+
+  if (result.created) {
+    if (!productTracking.seenCreated.has(id)) {
+      productTracking.seenCreated.add(id);
+      productTracking.createdProducts.push(summary);
+    }
+  } else if (!productTracking.seenReused.has(id)) {
+    productTracking.seenReused.add(id);
+    productTracking.reusedProducts.push(summary);
+  }
+
+  return {
+    product,
+    productId: product._id,
+    barcode: product.barcode,
+    hsnCode: product.hsnCode,
+  };
+};
 
 export const createPurchase = async (req, res, next) => {
   const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
@@ -92,29 +125,31 @@ export const createPurchase = async (req, res, next) => {
     const totalQty = items.reduce((s, i) => s + Number(i.quantity || 0), 0);
     const shippingPerItem = totalQty > 0 ? (shippingCharges || 0) / totalQty : 0;
 
-    for (const item of items) {
-      let productId = item.product;
+    const productTracking = { createdProducts: [], reusedProducts: [], seenCreated: new Set(), seenReused: new Set() };
 
-      // Inline product creation if new
-      if (item.isNewProduct && item.newProductData) {
-        const newProd = new Product({
-          ...item.newProductData,
-          stock: 0,
-        });
-        await newProd.save({ session });
-        productId = newProd._id;
-      }
+    for (const item of items) {
+      const resolved = await resolvePurchaseItemProduct(item, session, productTracking);
+      const product = resolved.product;
+      const productId = resolved.productId;
 
       finalItems.push({
         ...item,
         product: productId,
+        productId,
+        name: product.name,
+        itemName: product.name,
+        productName: product.name,
+        sku: product.sku,
+        barcode: resolved.barcode,
+        unit: product.unit,
         gstRate: item.gstRate || item.taxRate || 0,
         taxableAmount: item.taxableAmount ?? (Number(item.purchasePrice || 0) * Number(item.quantity || 0)),
         cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
         sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
         igstAmount: item.igstAmount ?? item.igst ?? 0,
         taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
-        hsn: item.hsn || item.hsnCode,
+        hsn: item.hsn || item.hsnCode || resolved.hsnCode,
+        hsnCode: resolved.hsnCode,
       });
 
       if (confirmedReceipt) {
@@ -132,7 +167,7 @@ export const createPurchase = async (req, res, next) => {
           extraChargePerProduct: shippingPerItem,
           salePrice: item.salesPrice || 0,
           expiryDate: item.expiryDate,
-          barcode: item.barcode,
+          barcode: resolved.barcode,
           reference: purchaseNumber,
           notes: `Purchase receipt: ${purchaseNumber}`,
           createdBy: req.user._id
@@ -143,7 +178,7 @@ export const createPurchase = async (req, res, next) => {
           productId: productId,
           purchaseId: purchase._id,
           batchId: batch._id,
-          barcode: item.barcode || productId.toString(),
+          barcode: resolved.barcode || productId.toString(),
           purchasePrice: item.purchasePrice || 0,
           taxPercent: item.taxRate || 0,
           taxAmount: item.taxAmount || 0,
@@ -241,6 +276,8 @@ export const createPurchase = async (req, res, next) => {
     res.status(201).json({
       success: true,
       data: populatedPurchase,
+      createdProducts: productTracking.createdProducts,
+      reusedProducts: productTracking.reusedProducts,
     });
   } catch (error) {
     if (session) {
@@ -551,29 +588,31 @@ export const updatePurchase = async (req, res, next) => {
     const totalQty = items.reduce((s, i) => s + Number(i.quantity || 0), 0);
     const shippingPerItem = totalQty > 0 ? (shippingCharges || 0) / totalQty : 0;
 
-    for (const item of items) {
-      let productId = item.product;
+    const productTracking = { createdProducts: [], reusedProducts: [], seenCreated: new Set(), seenReused: new Set() };
 
-      // Inline product creation if new
-      if (item.isNewProduct && item.newProductData) {
-        const newProd = new Product({
-          ...item.newProductData,
-          stock: 0,
-        });
-        await newProd.save({ session });
-        productId = newProd._id;
-      }
+    for (const item of items) {
+      const resolved = await resolvePurchaseItemProduct(item, session, productTracking);
+      const product = resolved.product;
+      const productId = resolved.productId;
 
       finalItems.push({
         ...item,
         product: productId,
+        productId,
+        name: product.name,
+        itemName: product.name,
+        productName: product.name,
+        sku: product.sku,
+        barcode: resolved.barcode,
+        unit: product.unit,
         gstRate: item.gstRate || item.taxRate || 0,
         taxableAmount: item.taxableAmount ?? (Number(item.purchasePrice || 0) * Number(item.quantity || 0)),
         cgstAmount: item.cgstAmount ?? item.cgst ?? 0,
         sgstAmount: item.sgstAmount ?? item.sgst ?? 0,
         igstAmount: item.igstAmount ?? item.igst ?? 0,
         taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
-        hsn: item.hsn || item.hsnCode,
+        hsn: item.hsn || item.hsnCode || resolved.hsnCode,
+        hsnCode: resolved.hsnCode,
       });
 
       if (newConfirmedReceipt) {
@@ -590,7 +629,7 @@ export const updatePurchase = async (req, res, next) => {
           extraChargePerProduct: shippingPerItem,
           salePrice: item.salesPrice || 0,
           expiryDate: item.expiryDate,
-          barcode: item.barcode,
+          barcode: resolved.barcode,
           reference: purchase.purchaseNumber,
           notes: `Purchase receipt updated: ${purchase.purchaseNumber}`,
           createdBy: req.user._id
@@ -600,7 +639,7 @@ export const updatePurchase = async (req, res, next) => {
           productId: productId,
           purchaseId: purchase._id,
           batchId: batch._id,
-          barcode: item.barcode || productId.toString(),
+          barcode: resolved.barcode || productId.toString(),
           purchasePrice: item.purchasePrice || 0,
           taxPercent: item.taxRate || 0,
           taxAmount: item.taxAmount || 0,
@@ -733,6 +772,8 @@ export const updatePurchase = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: populatedPurchase,
+      createdProducts: productTracking.createdProducts,
+      reusedProducts: productTracking.reusedProducts,
     });
   } catch (error) {
     if (session) await session.abortTransaction();

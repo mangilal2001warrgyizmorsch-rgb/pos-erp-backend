@@ -4,7 +4,20 @@ const saleReturnItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Product',
-    required: true,
+  },
+  saleItemId: {
+    type: mongoose.Schema.Types.ObjectId,
+  },
+  itemType: {
+    type: String,
+    enum: ['inventory', 'non_stock_product', 'service'],
+    default: 'inventory',
+  },
+  affectsInventory: {
+    type: Boolean,
+    default: function () {
+      return this.itemType === 'inventory';
+    },
   },
   barcode: {
     type: String,

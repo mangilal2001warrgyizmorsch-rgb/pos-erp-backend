@@ -39,6 +39,10 @@ const accountingSettingsSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ledger",
     },
+    defaultServiceIncomeLedgerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ledger",
+    },
     defaultPurchaseLedgerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ledger",

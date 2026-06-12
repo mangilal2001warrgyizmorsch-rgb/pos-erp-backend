@@ -41,7 +41,11 @@ const normalizeSaleItemTax = (item, stateOfSupply) => {
   const explicitSplit = roundMoney(Number(item.cgstAmount ?? item.cgst ?? 0)
     + Number(item.sgstAmount ?? item.sgst ?? 0)
     + Number(item.igstAmount ?? item.igst ?? 0));
-  const itemTax = roundMoney(item.taxAmount ?? explicitSplit);
+  const taxableAmount = roundMoney(item.taxableAmount ?? ((Number(item.unitPrice || 0) * Number(item.quantity || 0)) - Number(item.discountAmount ?? item.discount ?? 0)));
+  const calculatedTax = taxableAmount > 0 && Number(item.taxRate || item.gstRate || 0) > 0
+    ? taxableAmount * Number(item.taxRate || item.gstRate || 0) / 100
+    : 0;
+  const itemTax = roundMoney(item.taxAmount ?? (explicitSplit > 0 ? explicitSplit : calculatedTax));
   const split = explicitSplit > 0
     ? {
       cgst: Number(item.cgstAmount ?? item.cgst ?? 0),
@@ -49,7 +53,6 @@ const normalizeSaleItemTax = (item, stateOfSupply) => {
       igst: Number(item.igstAmount ?? item.igst ?? 0),
     }
     : splitTaxAmount(itemTax, stateOfSupply);
-  const taxableAmount = roundMoney(item.taxableAmount ?? (Number(item.unitPrice || 0) * Number(item.quantity || 0)));
   const total = roundMoney(item.total ?? (taxableAmount + itemTax));
   return { ...split, taxableAmount, taxAmount: itemTax, total };
 };
@@ -68,6 +71,167 @@ const normalizeHeaderTax = ({ taxAmount, totalCgst, totalSgst, totalIgst, stateO
   const split = splitTaxAmount(tax, stateOfSupply);
   return { totalCgst: split.cgst, totalSgst: split.sgst, totalIgst: split.igst, taxAmount: tax };
 };
+
+const SALE_ITEM_TYPES = new Set(['inventory', 'non_stock_product', 'service']);
+
+const normalizeItemType = (item) => {
+  const itemType = String(item.itemType || (item.product ? 'inventory' : 'non_stock_product')).toLowerCase();
+  if (!SALE_ITEM_TYPES.has(itemType)) {
+    throw new Error(`Invalid sale item type: ${item.itemType}`);
+  }
+  return itemType;
+};
+
+const getItemRate = (item) => Number(item.rate ?? item.unitPrice ?? item.pricePerUnit ?? item.sellingPrice ?? 0);
+
+const getItemDiscount = (item) => Number(item.discountAmount ?? item.discount ?? 0);
+
+const buildCustomSaleItem = (item, stateOfSupply) => {
+  const itemType = normalizeItemType(item);
+  const itemName = String(item.itemName ?? item.name ?? '');
+  if (!itemName.trim()) {
+    throw new Error('Item name is required for custom sale items');
+  }
+
+  const quantity = Number(item.quantity || 0);
+  const rate = getItemRate(item);
+  if (quantity <= 0) throw new Error(`Quantity must be greater than zero for ${itemName}`);
+  if (rate < 0) throw new Error(`Rate cannot be negative for ${itemName}`);
+
+  const itemTax = normalizeSaleItemTax({
+    ...item,
+    unitPrice: rate,
+    taxableAmount: item.taxableAmount ?? (quantity * rate) - getItemDiscount(item),
+  }, stateOfSupply);
+
+  return {
+    product: undefined,
+    itemType,
+    affectsInventory: false,
+    name: itemName,
+    itemName,
+    description: item.description,
+    sku: item.sku || '',
+    quantity,
+    unitPrice: rate,
+    rate,
+    discount: getItemDiscount(item),
+    purchasePrice: 0,
+    profitAmount: itemTax.taxableAmount,
+    taxRate: item.taxRate || 0,
+    gstRate: item.gstRate || item.taxRate || 0,
+    taxableAmount: itemTax.taxableAmount,
+    cgst: itemTax.cgst,
+    cgstAmount: itemTax.cgst,
+    sgst: itemTax.sgst,
+    sgstAmount: itemTax.sgst,
+    igst: itemTax.igst,
+    igstAmount: itemTax.igst,
+    taxAmount: itemTax.taxAmount,
+    hsn: item.hsn,
+    incomeLedger: item.incomeLedger || undefined,
+    total: itemTax.total,
+  };
+};
+
+const buildInventorySaleItem = async (item, stateOfSupply, invoiceNumber, referenceId, req, session) => {
+  const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
+  if (!product) {
+    throw new Error(`Product not found: ${item.product}`);
+  }
+
+  const quantity = Number(item.quantity || 0);
+  if (quantity <= 0) throw new Error(`Quantity must be greater than zero for ${product.name}`);
+
+  if ((product.stock || 0) < quantity) {
+    throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${quantity}`);
+  }
+
+  const batches = await StockBatch.find({
+    productId: item.product,
+    availableQty: { $gt: 0 }
+  }).sort({ createdAt: 1 }).session(session);
+
+  let remainingToDeduct = quantity;
+  let totalPurchaseCost = 0;
+
+  for (const batch of batches) {
+    if (remainingToDeduct <= 0) break;
+    const deductQty = Math.min(batch.availableQty, remainingToDeduct);
+    totalPurchaseCost += deductQty * batch.purchasePrice;
+    remainingToDeduct -= deductQty;
+  }
+
+  const avgPurchasePrice = quantity > 0 ? totalPurchaseCost / quantity : 0;
+
+  await inventoryService.deductStock({
+    productId: item.product,
+    quantity,
+    reference: invoiceNumber,
+    referenceId,
+    notes: referenceId ? `Updated Sale invoice ${invoiceNumber}` : `Sale invoice ${invoiceNumber}`,
+    createdBy: req.user._id
+  }, session);
+
+  const rate = getItemRate(item);
+  const itemTax = normalizeSaleItemTax({ ...item, quantity, unitPrice: rate }, stateOfSupply);
+  return {
+    product: product._id,
+    itemType: 'inventory',
+    affectsInventory: true,
+    name: product.name,
+    itemName: product.name,
+    description: item.description,
+    sku: product.sku,
+    quantity,
+    unitPrice: rate,
+    rate,
+    discount: getItemDiscount(item),
+    purchasePrice: avgPurchasePrice,
+    profitAmount: (rate * quantity) - totalPurchaseCost,
+    taxRate: item.taxRate || 0,
+    gstRate: item.gstRate || item.taxRate || 0,
+    taxableAmount: itemTax.taxableAmount,
+    cgst: itemTax.cgst,
+    cgstAmount: itemTax.cgst,
+    sgst: itemTax.sgst,
+    sgstAmount: itemTax.sgst,
+    igst: itemTax.igst,
+    igstAmount: itemTax.igst,
+    taxAmount: itemTax.taxAmount,
+    hsn: item.hsn || product.hsnCode || product.hsn,
+    total: itemTax.total,
+  };
+};
+
+const buildSaleItems = async (items, stateOfSupply, invoiceNumber, referenceId, req, session) => {
+  const saleItems = [];
+  for (const item of items || []) {
+    const itemType = normalizeItemType(item);
+    if (itemType === 'inventory') {
+      saleItems.push(await buildInventorySaleItem(item, stateOfSupply, invoiceNumber, referenceId, req, session));
+    } else {
+      saleItems.push(buildCustomSaleItem({ ...item, itemType }, stateOfSupply));
+    }
+  }
+  return saleItems;
+};
+
+const summarizeSaleItemTaxes = (saleItems) => saleItems.reduce((summary, item) => ({
+  totalCgst: roundMoney(summary.totalCgst + Number(item.cgstAmount ?? item.cgst ?? 0)),
+  totalSgst: roundMoney(summary.totalSgst + Number(item.sgstAmount ?? item.sgst ?? 0)),
+  totalIgst: roundMoney(summary.totalIgst + Number(item.igstAmount ?? item.igst ?? 0)),
+  taxAmount: roundMoney(summary.taxAmount + Number(item.taxAmount || 0)),
+}), { totalCgst: 0, totalSgst: 0, totalIgst: 0, taxAmount: 0 });
+
+const resolveHeaderTax = (headerTax, saleItems) => {
+  if (headerTax.taxAmount > 0 || headerTax.totalCgst > 0 || headerTax.totalSgst > 0 || headerTax.totalIgst > 0) {
+    return headerTax;
+  }
+  return summarizeSaleItemTaxes(saleItems);
+};
+
+const shouldAffectInventory = (item) => item.affectsInventory !== false && (item.itemType || 'inventory') === 'inventory' && item.product;
 
 // @desc    Create sale (with inventory reduction)
 // @route   POST /api/sales
@@ -102,75 +266,12 @@ export const createSale = async (req, res, next) => {
       cashBankAccountId,
     } = req.body;
 
-    const saleItems = [];
     const invoiceNumber = await generateSequenceNumber('INV', session);
-    const headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
+    let headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
     const netPaid = netReceivedAmount(amountPaid, totalAmount, changeAmount);
 
-    // Deduct stock and validate
-    for (const item of items) {
-      // 1. Fetch appropriate batches (FIFO logic by default) to calculate average purchase price
-      const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
-      if (!product) {
-        throw new Error(`Product not found: ${item.product}`);
-      }
-
-      // Check stock before hand
-      if ((product.stock || 0) < item.quantity) {
-        throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`);
-      }
-
-      // Compute average purchase price from active FIFO batches for correct profit margins
-      const batches = await StockBatch.find({
-        productId: item.product,
-        availableQty: { $gt: 0 }
-      }).sort({ createdAt: 1 }).session(session);
-
-      let remainingToDeduct = item.quantity;
-      let totalPurchaseCost = 0;
-
-      for (const batch of batches) {
-        if (remainingToDeduct <= 0) break;
-        const deductQty = Math.min(batch.availableQty, remainingToDeduct);
-        totalPurchaseCost += deductQty * batch.purchasePrice;
-        remainingToDeduct -= deductQty;
-      }
-
-      const avgPurchasePrice = item.quantity > 0 ? totalPurchaseCost / item.quantity : 0;
-
-      // 2. Call inventoryService to handle FIFO batch deduction, Product.stock update, and StockMovement log in transaction
-      await inventoryService.deductStock({
-        productId: item.product,
-        quantity: item.quantity,
-        reference: invoiceNumber,
-        referenceId: null, // assigned below after sale saves
-        notes: `Sale invoice ${invoiceNumber}`,
-        createdBy: req.user._id
-      }, session);
-
-      const itemTax = normalizeSaleItemTax(item, stateOfSupply);
-      saleItems.push({
-        product: product._id,
-        name: product.name,
-        sku: product.sku,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        purchasePrice: avgPurchasePrice,
-        profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
-        taxRate: item.taxRate || 0,
-        gstRate: item.gstRate || item.taxRate || 0,
-        taxableAmount: itemTax.taxableAmount,
-        cgst: itemTax.cgst,
-        cgstAmount: itemTax.cgst,
-        sgst: itemTax.sgst,
-        sgstAmount: itemTax.sgst,
-        igst: itemTax.igst,
-        igstAmount: itemTax.igst,
-        taxAmount: itemTax.taxAmount,
-        hsn: item.hsn || product.hsnCode || product.hsn,
-        total: itemTax.total,
-      });
-    }
+    const saleItems = await buildSaleItems(items, stateOfSupply, invoiceNumber, null, req, session);
+    headerTax = resolveHeaderTax(headerTax, saleItems);
 
     // Create the sale record
     const sale = new Sale({
@@ -189,7 +290,7 @@ export const createSale = async (req, res, next) => {
       totalIgst: headerTax.totalIgst,
       igstAmount: headerTax.totalIgst,
       taxableAmount: Number(subtotal || 0) - Number(discountAmount || 0),
-      totalTax: taxAmount || 0,
+      totalTax: headerTax.taxAmount,
       discountType: discountType || 'fixed',
       discountValue: discountValue || 0,
       discountAmount: discountAmount || 0,
@@ -438,6 +539,8 @@ export const cancelSale = async (req, res, next) => {
 
     // Restore stock and log movements
     for (const item of sale.items) {
+      if (!shouldAffectInventory(item)) continue;
+
       const product = await Product.findByIdAndUpdate(
         item.product,
         { $inc: { stock: item.quantity } },
@@ -578,7 +681,11 @@ export const getDashboardStats = async (req, res, next) => {
       { $unwind: '$items' },
       {
         $group: {
-          _id: '$items.product',
+          _id: {
+            product: '$items.product',
+            itemName: '$items.name',
+            itemType: { $ifNull: ['$items.itemType', 'inventory'] },
+          },
           name: { $first: '$items.name' },
           totalQuantity: { $sum: '$items.quantity' },
           totalRevenue: { $sum: '$items.total' },
@@ -744,6 +851,8 @@ export const deleteSale = async (req, res, next) => {
 
     // 1. Restore stock and log movements
     for (const item of sale.items) {
+      if (!shouldAffectInventory(item)) continue;
+
       const product = await Product.findByIdAndUpdate(
         item.product,
         { $inc: { stock: item.quantity } },
@@ -871,11 +980,13 @@ export const updateSale = async (req, res, next) => {
       notes,
       cashBankAccountId,
     } = req.body;
-    const headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
+    let headerTax = normalizeHeaderTax({ taxAmount, totalCgst, totalSgst, totalIgst, stateOfSupply });
     const netPaid = netReceivedAmount(amountPaid, totalAmount, changeAmount);
 
     // 1. REVERSAL PHASE (of old sale)
     for (const item of sale.items) {
+      if (!shouldAffectInventory(item)) continue;
+
       const product = await Product.findByIdAndUpdate(
         item.product,
         { $inc: { stock: item.quantity } },
@@ -923,69 +1034,8 @@ export const updateSale = async (req, res, next) => {
     await CashBankTransaction.deleteMany({ referenceId: sale._id }).session(session);
 
     // 2. CREATION/APPLICATION PHASE (of new sale details)
-    const saleItems = [];
-
-    // Deduct stock and validate
-    for (const item of items) {
-      const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
-      if (!product) {
-        throw new Error(`Product not found: ${item.product}`);
-      }
-
-      // Check stock
-      if ((product.stock || 0) < item.quantity) {
-        throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`);
-      }
-
-      const batches = await StockBatch.find({
-        productId: item.product,
-        availableQty: { $gt: 0 }
-      }).sort({ createdAt: 1 }).session(session);
-
-      let remainingToDeduct = item.quantity;
-      let totalPurchaseCost = 0;
-
-      for (const batch of batches) {
-        if (remainingToDeduct <= 0) break;
-        const deductQty = Math.min(batch.availableQty, remainingToDeduct);
-        totalPurchaseCost += deductQty * batch.purchasePrice;
-        remainingToDeduct -= deductQty;
-      }
-
-      const avgPurchasePrice = item.quantity > 0 ? totalPurchaseCost / item.quantity : 0;
-
-      await inventoryService.deductStock({
-        productId: item.product,
-        quantity: item.quantity,
-        reference: sale.invoiceNumber,
-        referenceId: sale._id,
-        notes: `Updated Sale invoice ${sale.invoiceNumber}`,
-        createdBy: req.user._id
-      }, session);
-
-      const itemTax = normalizeSaleItemTax(item, stateOfSupply);
-      saleItems.push({
-        product: product._id,
-        name: product.name,
-        sku: product.sku,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        purchasePrice: avgPurchasePrice,
-        profitAmount: (item.unitPrice * item.quantity) - totalPurchaseCost,
-        taxRate: item.taxRate || 0,
-        gstRate: item.gstRate || item.taxRate || 0,
-        taxableAmount: itemTax.taxableAmount,
-        cgst: itemTax.cgst,
-        cgstAmount: itemTax.cgst,
-        sgst: itemTax.sgst,
-        sgstAmount: itemTax.sgst,
-        igst: itemTax.igst,
-        igstAmount: itemTax.igst,
-        taxAmount: itemTax.taxAmount,
-        hsn: item.hsn || product.hsnCode || product.hsn,
-        total: itemTax.total,
-      });
-    }
+    const saleItems = await buildSaleItems(items, stateOfSupply, sale.invoiceNumber, sale._id, req, session);
+    headerTax = resolveHeaderTax(headerTax, saleItems);
 
     // Update sale fields in-place
     sale.items = saleItems;
@@ -1002,7 +1052,7 @@ export const updateSale = async (req, res, next) => {
     sale.totalIgst = headerTax.totalIgst;
     sale.igstAmount = headerTax.totalIgst;
     sale.taxableAmount = Number(subtotal || 0) - Number(discountAmount || 0);
-    sale.totalTax = taxAmount || 0;
+    sale.totalTax = headerTax.taxAmount;
     sale.discountType = discountType || 'fixed';
     sale.discountValue = discountValue || 0;
     sale.discountAmount = discountAmount || 0;

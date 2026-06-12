@@ -334,7 +334,7 @@ export const postPurchaseAccountingVoucher = async (
   }
 
   if (roundOffLedger && residual < 0) {
-    addEntry(entries, roundOffLedger, Math.abs(residual), 0, `Round off adjustment on Purchase Bill ${billNo}`);
+    addEntry(entries, roundOffLedger, 0, Math.abs(residual), `Round off adjustment on Purchase Bill ${billNo}`);
   }
 
   if (supplierLedger) {
@@ -362,7 +362,7 @@ export const postPurchaseAccountingVoucher = async (
   }
 
   if (roundOffLedger && residual > 0) {
-    addEntry(entries, roundOffLedger, 0, residual, `Round off adjustment on Purchase Bill ${billNo}`);
+    addEntry(entries, roundOffLedger, residual, 0, `Round off adjustment on Purchase Bill ${billNo}`);
   }
 
   const posted = await postVoucher({
