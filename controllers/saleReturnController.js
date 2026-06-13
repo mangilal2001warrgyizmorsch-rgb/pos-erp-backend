@@ -17,6 +17,11 @@ import { postSaleReturnAccountingVoucher } from '../services/accounting/returnAc
 import { emitSocketEvent } from '../utils/socket.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
+const isCashPaymentMode = (paymentMode) => String(paymentMode || '').toLowerCase() === 'cash';
+const sanitizeRefundAccountId = (refundType, paymentMode, accountId) => (
+  refundType === 'refund_now' && !isCashPaymentMode(paymentMode) ? (accountId || null) : null
+);
+
 const returnItemAffectsInventory = (item) => item.affectsInventory !== false
   && (item.itemType || 'inventory') === 'inventory'
   && Boolean(item.product);
@@ -59,6 +64,12 @@ export const createSaleReturn = async (req, res, next) => {
       referenceNo,
       notes,
     } = req.body;
+
+    if (refundType === 'refund_now' && !paymentMode) {
+      return res.status(400).json({ success: false, message: 'Payment mode is required for immediate refunds.' });
+    }
+
+    const cashBankAccountIdClean = sanitizeRefundAccountId(refundType, paymentMode, cashBankAccountId);
 
     // 1. Validate customer exists
     const customer = await Customer.findById(customerId).session(session);
@@ -171,7 +182,7 @@ export const createSaleReturn = async (req, res, next) => {
       refundMethod: refundType === 'refund_now' ? (paymentMode.toLowerCase() === 'cash' ? 'cash' : (paymentMode.toLowerCase() === 'wallet' ? 'wallet' : 'bank')) : 'credit_note',
       refundType,
       paymentMode,
-      cashBankAccountId: refundType === 'refund_now' ? cashBankAccountId : null,
+      cashBankAccountId: cashBankAccountIdClean,
       refundedAmount: refundType === 'refund_now' ? calculatedGrandTotal : 0,
       creditBalance: refundType !== 'refund_now' ? calculatedGrandTotal : 0,
       referenceNo,
@@ -244,7 +255,7 @@ export const createSaleReturn = async (req, res, next) => {
         amount: calculatedGrandTotal,
         paymentMode,
         accountType,
-        accountId: cashBankAccountId || undefined,
+        accountId: cashBankAccountIdClean || undefined,
         partyId: customerId,
         partyType: 'Customer',
         referenceModule: 'sale_return',
@@ -344,6 +355,7 @@ export const getSaleReturns = async (req, res, next) => {
       customerId,
       status,
       paymentMode,
+      refundType,
     } = req.query;
 
     const query = {};
@@ -351,7 +363,7 @@ export const getSaleReturns = async (req, res, next) => {
     if (search) {
       query.$or = [
         { creditNoteNo: { $regex: search, $options: 'i' } },
-        { originalInvoiceNo: { $regex: search, $options: 'i' } },
+        { invoiceNumber: { $regex: search, $options: 'i' } },
         { customerName: { $regex: search, $options: 'i' } },
       ];
     }
@@ -365,6 +377,7 @@ export const getSaleReturns = async (req, res, next) => {
     if (customerId) query.customer = customerId;
     if (status) query.status = status;
     if (paymentMode) query.paymentMode = paymentMode;
+    if (refundType) query.refundType = refundType;
 
     const total = await SalesReturn.countDocuments(query);
     const returns = await SalesReturn.find(query)
@@ -508,6 +521,14 @@ export const cancelSaleReturn = async (req, res, next) => {
           product.stock -= item.returnQty;
         }
         await product.save({ session });
+
+        if (item.stockAction === 'restore_stock') {
+          const batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+          if (batch) {
+            batch.availableQty = Math.max(0, Number(batch.availableQty || 0) - Number(item.returnQty || 0));
+            await batch.save({ session });
+          }
+        }
       }
     }
 
@@ -619,7 +640,7 @@ export const deleteSaleReturn = async (req, res, next) => {
           // Reverse the batch quantities
           let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
           if (batch) {
-            batch.availableQty -= item.returnQty;
+            batch.availableQty = Math.max(0, Number(batch.availableQty || 0) - Number(item.returnQty || 0));
             await batch.save({ session });
           }
         }

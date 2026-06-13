@@ -112,7 +112,7 @@ export const createCashBankTransaction = async ({
 
   if (accountType === 'cash') {
     const defaultCash = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
-    accountId = accountId || (defaultCash ? defaultCash._id : null);
+    accountId = defaultCash ? defaultCash._id : null;
   } else if (accountType === 'bank') {
     if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
       const defaultBank = await BankAccount.findOne({ accountType: 'bank', isDefault: true }).session(session) || 

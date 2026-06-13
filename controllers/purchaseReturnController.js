@@ -17,6 +17,11 @@ import { postPurchaseReturnAccountingVoucher } from '../services/accounting/retu
 import { emitSocketEvent } from '../utils/socket.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
 
+const isCashPaymentMode = (paymentMode) => String(paymentMode || '').toLowerCase() === 'cash';
+const sanitizeRefundAccountId = (refundType, paymentMode, accountId) => (
+  refundType === 'refund_received' && !isCashPaymentMode(paymentMode) ? (accountId || null) : null
+);
+
 // @desc    Create Purchase Return / Debit Note
 // @route   POST /api/purchases-returns
 export const createPurchaseReturn = async (req, res, next) => {
@@ -50,6 +55,12 @@ export const createPurchaseReturn = async (req, res, next) => {
       referenceNo,
       notes,
     } = req.body;
+
+    if (refundType === 'refund_received' && !paymentMode) {
+      return res.status(400).json({ success: false, message: 'Payment mode is required when refund is received.' });
+    }
+
+    const cashBankAccountIdClean = sanitizeRefundAccountId(refundType, paymentMode, cashBankAccountId);
 
     // 1. Validate supplier exists
     const supplier = await Supplier.findById(supplierId).session(session);
@@ -170,7 +181,7 @@ export const createPurchaseReturn = async (req, res, next) => {
       refundMethod: refundType === 'refund_received' ? (paymentMode.toLowerCase() === 'cash' ? 'cash' : 'bank') : 'vendor_credit',
       refundType,
       paymentMode,
-      cashBankAccountId: refundType === 'refund_received' ? cashBankAccountId : null,
+      cashBankAccountId: cashBankAccountIdClean,
       refundReceivedAmount: refundType === 'refund_received' ? calculatedGrandTotal : 0,
       debitBalance: refundType !== 'refund_received' ? calculatedGrandTotal : 0,
       referenceNo,
@@ -225,7 +236,7 @@ export const createPurchaseReturn = async (req, res, next) => {
         amount: calculatedGrandTotal,
         paymentMode,
         accountType,
-        accountId: cashBankAccountId || undefined,
+        accountId: cashBankAccountIdClean || undefined,
         partyId: supplierId,
         partyType: 'Supplier',
         referenceModule: 'purchase_return',
@@ -324,6 +335,7 @@ export const getPurchaseReturns = async (req, res, next) => {
       supplierId,
       status,
       paymentMode,
+      refundType,
     } = req.query;
 
     const query = {};
@@ -331,7 +343,7 @@ export const getPurchaseReturns = async (req, res, next) => {
     if (search) {
       query.$or = [
         { debitNoteNo: { $regex: search, $options: 'i' } },
-        { originalPurchaseNo: { $regex: search, $options: 'i' } },
+        { purchaseNumber: { $regex: search, $options: 'i' } },
         { supplierName: { $regex: search, $options: 'i' } },
       ];
     }
@@ -345,6 +357,7 @@ export const getPurchaseReturns = async (req, res, next) => {
     if (supplierId) query.supplier = supplierId;
     if (status) query.status = status;
     if (paymentMode) query.paymentMode = paymentMode;
+    if (refundType) query.refundType = refundType;
 
     const total = await PurchaseReturn.countDocuments(query);
     const returns = await PurchaseReturn.find(query)
@@ -481,6 +494,12 @@ export const cancelPurchaseReturn = async (req, res, next) => {
       if (product) {
         product.stock += item.returnQty;
         await product.save({ session });
+
+        const batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        if (batch) {
+          batch.availableQty += item.returnQty;
+          await batch.save({ session });
+        }
       }
     }
 
@@ -584,8 +603,8 @@ export const deletePurchaseReturn = async (req, res, next) => {
     for (const item of purchaseReturn.items) {
       const product = await Product.findById(item.product).session(session);
       if (product) {
-        // Reduce the stock back to what it was before the return
-        product.stock -= item.returnQty;
+        // Purchase returns deduct stock on create, so deletion restores it.
+        product.stock += item.returnQty;
         await product.save({ session });
         
         // Reverse the batch quantities

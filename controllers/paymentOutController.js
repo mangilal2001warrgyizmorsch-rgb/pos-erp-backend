@@ -12,6 +12,79 @@ import { postPaymentOutAccountingVoucher } from '../services/accounting/paymentA
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
+const makeValidationError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
+const sanitizeObjectId = (value) => value ? value : undefined;
+
+const isCashPaymentMode = (paymentMode) => String(paymentMode || '').toLowerCase() === 'cash';
+
+const getPurchaseTotal = (purchase) => Number(purchase?.totalAmount ?? purchase?.grandTotal ?? 0);
+
+const getPaymentStatus = (paidAmount, totalAmount) => {
+  const paid = Number(paidAmount || 0);
+  const total = Number(totalAmount || 0);
+  if (paid <= 0) return 'pending';
+  return paid + 0.009 >= total ? 'paid' : 'partial';
+};
+
+const validatePaymentOutRequest = async ({
+  partyId,
+  amountPaid,
+  paymentMode,
+  cashBankAccountId,
+  linkedPurchaseId,
+  existingPayment = null,
+  session = null,
+}) => {
+  if (!partyId) throw makeValidationError('Payment-Out requires a supplier.');
+  if (!paymentMode) throw makeValidationError('Payment-Out requires a payment mode.');
+
+  const amount = Number(amountPaid);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw makeValidationError('Payment amount must be greater than zero.');
+  }
+
+  if (!isCashPaymentMode(paymentMode)) {
+    if (!cashBankAccountId) {
+      throw makeValidationError('Bank/UPI/Card payments require a cash/bank account.');
+    }
+
+    const bankAccount = await BankAccount.findOne({
+      _id: cashBankAccountId,
+      accountType: 'bank',
+      status: 'active',
+    }).session(session);
+    if (!bankAccount) {
+      throw makeValidationError('Selected bank account is invalid or inactive.');
+    }
+  }
+
+  if (linkedPurchaseId) {
+    const purchase = await Purchase.findById(linkedPurchaseId).session(session);
+    if (!purchase) throw makeValidationError('Linked purchase bill not found.');
+    if (purchase.supplier && String(purchase.supplier) !== String(partyId)) {
+      throw makeValidationError('Linked purchase bill does not belong to the selected supplier.');
+    }
+
+    const previousAmountOnSamePurchase = existingPayment
+      && existingPayment.linkedPurchaseId
+      && String(existingPayment.linkedPurchaseId) === String(linkedPurchaseId)
+      ? Number(existingPayment.amountPaid || 0)
+      : 0;
+    const alreadyPaidExcludingThisPayment = Math.max(0, Number(purchase.amountPaid || 0) - previousAmountOnSamePurchase);
+    const remaining = getPurchaseTotal(purchase) - alreadyPaidExcludingThisPayment;
+    if (amount - remaining > 0.009) {
+      throw makeValidationError(`Payment amount exceeds linked purchase outstanding amount. Remaining: ${Math.max(0, remaining).toFixed(2)}.`);
+    }
+  }
+
+  return amount;
+};
+
 // @desc    Create a new payment out
 // @route   POST /api/payment-out
 // @access  Private
@@ -35,12 +108,21 @@ export const createPaymentOut = async (req, res) => {
       date
     } = req.body;
 
-    const sanitizeObjectId = (value) => value ? value : undefined;
-    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
+    const cashBankAccountIdClean = isCashPaymentMode(paymentMode)
+      ? undefined
+      : sanitizeObjectId(cashBankAccountId);
     const linkedPurchaseIdClean = sanitizeObjectId(linkedPurchaseId);
+    const paymentAmount = await validatePaymentOutRequest({
+      partyId,
+      amountPaid,
+      paymentMode,
+      cashBankAccountId: cashBankAccountIdClean,
+      linkedPurchaseId: linkedPurchaseIdClean,
+      session,
+    });
 
     const supplier = await Supplier.findById(partyId).session(session);
-    if (!supplier) throw new Error('Supplier not found');
+    if (!supplier) throw makeValidationError('Supplier not found');
 
     // 1. Generate Receipt Number
     const counter = await Counter.findOneAndUpdate(
@@ -55,7 +137,7 @@ export const createPaymentOut = async (req, res) => {
       receiptNo,
       partyId,
       partyName: supplier.name,
-      amountPaid,
+      amountPaid: paymentAmount,
       paymentMode,
       cashBankAccountId: cashBankAccountIdClean,
       linkedPurchaseId: linkedPurchaseIdClean,
@@ -72,9 +154,9 @@ export const createPaymentOut = async (req, res) => {
       date: date || new Date(),
       type: 'payment_out',
       direction: 'out',
-      amount: amountPaid,
+      amount: paymentAmount,
       paymentMode,
-      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      accountType: isCashPaymentMode(paymentMode) ? 'cash' : 'bank',
       accountId: cashBankAccountIdClean || undefined,
       partyId,
       partyType: 'Supplier',
@@ -90,7 +172,7 @@ export const createPaymentOut = async (req, res) => {
       partyId,
       partyType: 'Supplier',
       type: 'payment_out',
-      debitAmount: amountPaid,
+      debitAmount: paymentAmount,
       referenceId: paymentOut._id,
       receiptNo,
       notes: description,
@@ -101,11 +183,8 @@ export const createPaymentOut = async (req, res) => {
     if (linkedPurchaseIdClean) {
       const purchase = await Purchase.findById(linkedPurchaseIdClean).session(session);
       if (purchase) {
-        const newAmountPaid = (purchase.amountPaid || 0) + Number(amountPaid);
-        let paymentStatus = 'partial';
-        if (newAmountPaid >= purchase.totalAmount) {
-          paymentStatus = 'paid';
-        }
+        const newAmountPaid = (purchase.amountPaid || 0) + paymentAmount;
+        const paymentStatus = getPaymentStatus(newAmountPaid, getPurchaseTotal(purchase));
         await Purchase.findByIdAndUpdate(
           linkedPurchaseIdClean,
           { 
@@ -134,7 +213,7 @@ export const createPaymentOut = async (req, res) => {
       emitSocketEvent('paymentOut:created', {
         _id: paymentOut._id,
         receiptNo,
-        amountPaid,
+        amountPaid: paymentAmount,
         supplierName: supplier.name
       });
     } catch (e) {
@@ -146,7 +225,7 @@ export const createPaymentOut = async (req, res) => {
     if (session) {
       await session.abortTransaction();
     }
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   } finally {
     if (session) {
       session.endSession();
@@ -214,25 +293,21 @@ export const deletePaymentOut = async (req, res) => {
       account = await BankAccount.findOne({ accountType: 'cash', isDefault: true });
     }
     if (account) {
-      account.currentBalance += payment.amountPaid;
+      account.currentBalance += Number(payment.amountPaid || 0);
       await account.save({ validateBeforeSave: false });
     }
 
     const supplier = await Supplier.findById(payment.partyId);
     if (supplier) {
-      await Supplier.findByIdAndUpdate(payment.partyId, { $inc: { outstandingBalance: payment.amountPaid } });
+      await Supplier.findByIdAndUpdate(payment.partyId, { $inc: { outstandingBalance: Number(payment.amountPaid || 0) } });
     }
 
 
     if (payment.linkedPurchaseId) {
       const purchase = await Purchase.findById(payment.linkedPurchaseId);
       if (purchase) {
-        purchase.amountPaid -= payment.amountPaid;
-        if (purchase.amountPaid <= 0) {
-          purchase.paymentStatus = 'pending';
-        } else if (purchase.amountPaid < purchase.totalAmount) {
-          purchase.paymentStatus = 'partial';
-        }
+        purchase.amountPaid = Math.max(0, Number(purchase.amountPaid || 0) - Number(payment.amountPaid || 0));
+        purchase.paymentStatus = getPaymentStatus(purchase.amountPaid, getPurchaseTotal(purchase));
 
         await purchase.save();
       }
@@ -280,9 +355,25 @@ export const updatePaymentOut = async (req, res) => {
       date
     } = req.body;
 
-    const sanitizeObjectId = (value) => value ? value : undefined;
-    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
-    const linkedPurchaseIdClean = sanitizeObjectId(linkedPurchaseId);
+    const newPartyId = partyId || payment.partyId;
+    const newPaymentMode = paymentMode || payment.paymentMode;
+    const cashBankAccountIdClean = isCashPaymentMode(newPaymentMode)
+      ? undefined
+      : cashBankAccountId !== undefined
+        ? sanitizeObjectId(cashBankAccountId)
+        : payment.cashBankAccountId;
+    const linkedPurchaseIdClean = linkedPurchaseId !== undefined
+      ? sanitizeObjectId(linkedPurchaseId)
+      : payment.linkedPurchaseId;
+    const paymentAmount = await validatePaymentOutRequest({
+      partyId: newPartyId,
+      amountPaid: amountPaid !== undefined ? amountPaid : payment.amountPaid,
+      paymentMode: newPaymentMode,
+      cashBankAccountId: cashBankAccountIdClean,
+      linkedPurchaseId: linkedPurchaseIdClean,
+      existingPayment: payment,
+      session,
+    });
 
     // 1. Revert Old Effects
     // Revert account balance
@@ -293,14 +384,14 @@ export const updatePaymentOut = async (req, res) => {
       oldAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
     }
     if (oldAccount) {
-      oldAccount.currentBalance += payment.amountPaid;
+      oldAccount.currentBalance += Number(payment.amountPaid || 0);
       await oldAccount.save({ session, validateBeforeSave: false });
     }
 
     // Revert Supplier outstanding balance
     const oldSupplier = await Supplier.findById(payment.partyId).session(session);
     if (oldSupplier) {
-      oldSupplier.outstandingBalance += payment.amountPaid;
+      oldSupplier.outstandingBalance += Number(payment.amountPaid || 0);
       await oldSupplier.save({ session });
     }
 
@@ -308,14 +399,8 @@ export const updatePaymentOut = async (req, res) => {
     if (payment.linkedPurchaseId) {
       const oldPurchase = await Purchase.findById(payment.linkedPurchaseId).session(session);
       if (oldPurchase) {
-        oldPurchase.amountPaid -= payment.amountPaid;
-        if (oldPurchase.amountPaid <= 0) {
-          oldPurchase.paymentStatus = 'pending';
-        } else if (oldPurchase.amountPaid < oldPurchase.totalAmount) {
-          oldPurchase.paymentStatus = 'partial';
-        } else {
-          oldPurchase.paymentStatus = 'paid';
-        }
+        oldPurchase.amountPaid = Math.max(0, Number(oldPurchase.amountPaid || 0) - Number(payment.amountPaid || 0));
+        oldPurchase.paymentStatus = getPaymentStatus(oldPurchase.amountPaid, getPurchaseTotal(oldPurchase));
         await oldPurchase.save({ session });
       }
     }
@@ -325,14 +410,13 @@ export const updatePaymentOut = async (req, res) => {
     await PartyLedger.deleteOne({ referenceId: payment._id }).session(session);
 
     // 2. Apply New Effects
-    const newPartyId = partyId || payment.partyId;
     const newSupplier = await Supplier.findById(newPartyId).session(session);
-    if (!newSupplier) throw new Error('Supplier not found');
+    if (!newSupplier) throw makeValidationError('Supplier not found');
 
     payment.partyId = newPartyId;
     payment.partyName = newSupplier.name;
-    payment.amountPaid = amountPaid;
-    payment.paymentMode = paymentMode;
+    payment.amountPaid = paymentAmount;
+    payment.paymentMode = newPaymentMode;
     payment.cashBankAccountId = cashBankAccountIdClean;
     payment.linkedPurchaseId = linkedPurchaseIdClean;
     payment.referenceNo = referenceNo;
@@ -342,18 +426,14 @@ export const updatePaymentOut = async (req, res) => {
 
     await payment.save({ session });
 
-    // Apply new Supplier outstanding balance
-    newSupplier.outstandingBalance -= amountPaid;
-    await newSupplier.save({ session });
-
     // Apply new CashBank transaction
     await createCashBankTransaction({
       date: date || new Date(),
       type: 'payment_out',
       direction: 'out',
-      amount: amountPaid,
-      paymentMode,
-      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      amount: paymentAmount,
+      paymentMode: newPaymentMode,
+      accountType: isCashPaymentMode(newPaymentMode) ? 'cash' : 'bank',
       accountId: cashBankAccountIdClean || undefined,
       partyId: newPartyId,
       partyType: 'Supplier',
@@ -369,7 +449,7 @@ export const updatePaymentOut = async (req, res) => {
       partyId: newPartyId,
       partyType: 'Supplier',
       type: 'payment_out',
-      debitAmount: amountPaid,
+      debitAmount: paymentAmount,
       referenceId: payment._id,
       receiptNo: payment.receiptNo,
       notes: description,
@@ -380,11 +460,8 @@ export const updatePaymentOut = async (req, res) => {
     if (linkedPurchaseIdClean) {
       const newPurchase = await Purchase.findById(linkedPurchaseIdClean).session(session);
       if (newPurchase) {
-        const newAmountPaid = (newPurchase.amountPaid || 0) + Number(amountPaid);
-        let paymentStatus = 'partial';
-        if (newAmountPaid >= newPurchase.totalAmount) {
-          paymentStatus = 'paid';
-        }
+        const newAmountPaid = (newPurchase.amountPaid || 0) + paymentAmount;
+        const paymentStatus = getPaymentStatus(newAmountPaid, getPurchaseTotal(newPurchase));
         await Purchase.findByIdAndUpdate(
           linkedPurchaseIdClean,
           { 
@@ -422,7 +499,7 @@ export const updatePaymentOut = async (req, res) => {
       emitSocketEvent('paymentOut:updated', {
         _id: payment._id,
         receiptNo: payment.receiptNo,
-        amountPaid,
+        amountPaid: paymentAmount,
         supplierName: newSupplier.name
       });
     } catch (e) {
@@ -434,7 +511,7 @@ export const updatePaymentOut = async (req, res) => {
     if (session) {
       await session.abortTransaction();
     }
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   } finally {
     if (session) {
       session.endSession();

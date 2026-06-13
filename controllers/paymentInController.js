@@ -12,6 +12,79 @@ import { postPaymentInAccountingVoucher } from '../services/accounting/paymentAc
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
+const makeValidationError = (message) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+};
+
+const sanitizeObjectId = (value) => value ? value : undefined;
+
+const isCashPaymentMode = (paymentMode) => String(paymentMode || '').toLowerCase() === 'cash';
+
+const getSaleTotal = (sale) => Number(sale?.totalAmount ?? sale?.grandTotal ?? 0);
+
+const getPaymentStatus = (paidAmount, totalAmount) => {
+  const paid = Number(paidAmount || 0);
+  const total = Number(totalAmount || 0);
+  if (paid <= 0) return 'pending';
+  return paid + 0.009 >= total ? 'paid' : 'partial';
+};
+
+const validatePaymentInRequest = async ({
+  partyId,
+  amountReceived,
+  paymentMode,
+  cashBankAccountId,
+  linkedInvoiceId,
+  existingPayment = null,
+  session = null,
+}) => {
+  if (!partyId) throw makeValidationError('Payment-In requires a customer.');
+  if (!paymentMode) throw makeValidationError('Payment-In requires a payment mode.');
+
+  const amount = Number(amountReceived);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw makeValidationError('Payment amount must be greater than zero.');
+  }
+
+  if (!isCashPaymentMode(paymentMode)) {
+    if (!cashBankAccountId) {
+      throw makeValidationError('Bank/UPI/Card payments require a cash/bank account.');
+    }
+
+    const bankAccount = await BankAccount.findOne({
+      _id: cashBankAccountId,
+      accountType: 'bank',
+      status: 'active',
+    }).session(session);
+    if (!bankAccount) {
+      throw makeValidationError('Selected bank account is invalid or inactive.');
+    }
+  }
+
+  if (linkedInvoiceId) {
+    const sale = await Sale.findById(linkedInvoiceId).session(session);
+    if (!sale) throw makeValidationError('Linked sale invoice not found.');
+    if (sale.customer && String(sale.customer) !== String(partyId)) {
+      throw makeValidationError('Linked sale invoice does not belong to the selected customer.');
+    }
+
+    const previousAmountOnSameInvoice = existingPayment
+      && existingPayment.linkedInvoiceId
+      && String(existingPayment.linkedInvoiceId) === String(linkedInvoiceId)
+      ? Number(existingPayment.amountReceived || 0)
+      : 0;
+    const alreadyPaidExcludingThisPayment = Math.max(0, Number(sale.amountPaid || 0) - previousAmountOnSameInvoice);
+    const remaining = getSaleTotal(sale) - alreadyPaidExcludingThisPayment;
+    if (amount - remaining > 0.009) {
+      throw makeValidationError(`Payment amount exceeds linked invoice outstanding amount. Remaining: ${Math.max(0, remaining).toFixed(2)}.`);
+    }
+  }
+
+  return amount;
+};
+
 // @desc    Create a new payment in
 // @route   POST /api/payment-in
 // @access  Private
@@ -35,12 +108,21 @@ export const createPaymentIn = async (req, res) => {
       date
     } = req.body;
 
-    const sanitizeObjectId = (value) => value ? value : undefined;
-    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
+    const cashBankAccountIdClean = isCashPaymentMode(paymentMode)
+      ? undefined
+      : sanitizeObjectId(cashBankAccountId);
     const linkedInvoiceIdClean = sanitizeObjectId(linkedInvoiceId);
+    const paymentAmount = await validatePaymentInRequest({
+      partyId,
+      amountReceived,
+      paymentMode,
+      cashBankAccountId: cashBankAccountIdClean,
+      linkedInvoiceId: linkedInvoiceIdClean,
+      session,
+    });
 
     const customer = await Customer.findById(partyId).session(session);
-    if (!customer) throw new Error('Customer not found');
+    if (!customer) throw makeValidationError('Customer not found');
 
     // 1. Generate Receipt Number
     const counter = await Counter.findOneAndUpdate(
@@ -55,7 +137,7 @@ export const createPaymentIn = async (req, res) => {
       receiptNo,
       partyId,
       partyName: customer.name,
-      amountReceived,
+      amountReceived: paymentAmount,
       paymentMode,
       cashBankAccountId: cashBankAccountIdClean,
       linkedInvoiceId: linkedInvoiceIdClean,
@@ -72,9 +154,9 @@ export const createPaymentIn = async (req, res) => {
       date: date || new Date(),
       type: 'payment_in',
       direction: 'in',
-      amount: amountReceived,
+      amount: paymentAmount,
       paymentMode,
-      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      accountType: isCashPaymentMode(paymentMode) ? 'cash' : 'bank',
       accountId: cashBankAccountIdClean || undefined,
       partyId,
       partyType: 'Customer',
@@ -90,7 +172,7 @@ export const createPaymentIn = async (req, res) => {
       partyId,
       partyType: 'Customer',
       type: 'payment_in',
-      creditAmount: amountReceived,
+      creditAmount: paymentAmount,
       referenceId: paymentIn._id,
       receiptNo,
       notes: description,
@@ -101,13 +183,10 @@ export const createPaymentIn = async (req, res) => {
     if (linkedInvoiceIdClean) {
       const sale = await Sale.findById(linkedInvoiceIdClean).session(session);
       if (sale) {
-        const newAmountPaid = (sale.amountPaid || 0) + Number(amountReceived);
-        let paymentStatus = 'partial';
-        if (newAmountPaid >= sale.totalAmount) {
-          paymentStatus = 'paid';
-        }
+        const newAmountPaid = (sale.amountPaid || 0) + paymentAmount;
+        const paymentStatus = getPaymentStatus(newAmountPaid, getSaleTotal(sale));
         await Sale.findByIdAndUpdate(
-          linkedInvoiceId,
+          linkedInvoiceIdClean,
           { 
             $set: { 
               amountPaid: newAmountPaid,
@@ -134,7 +213,7 @@ export const createPaymentIn = async (req, res) => {
       emitSocketEvent('paymentIn:created', {
         _id: paymentIn._id,
         receiptNo,
-        amountReceived,
+        amountReceived: paymentAmount,
         customerName: customer.name
       });
     } catch (e) {
@@ -146,7 +225,7 @@ export const createPaymentIn = async (req, res) => {
     if (session) {
       await session.abortTransaction();
     }
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   } finally {
     if (session) {
       session.endSession();
@@ -214,25 +293,21 @@ export const deletePaymentIn = async (req, res) => {
       account = await BankAccount.findOne({ accountType: 'cash', isDefault: true });
     }
     if (account) {
-      account.currentBalance -= payment.amountReceived;
+      account.currentBalance -= Number(payment.amountReceived || 0);
       await account.save({ validateBeforeSave: false });
     }
 
     const customer = await Customer.findById(payment.partyId);
     if (customer) {
-      customer.walletBalance -= payment.amountReceived;
+      customer.walletBalance -= Number(payment.amountReceived || 0);
       await customer.save();
     }
 
     if (payment.linkedInvoiceId) {
       const sale = await Sale.findById(payment.linkedInvoiceId);
       if (sale) {
-        sale.amountPaid -= payment.amountReceived;
-        if (sale.amountPaid <= 0) {
-          sale.paymentStatus = 'pending';
-        } else if (sale.amountPaid < sale.totalAmount) {
-          sale.paymentStatus = 'partial';
-        }
+        sale.amountPaid = Math.max(0, Number(sale.amountPaid || 0) - Number(payment.amountReceived || 0));
+        sale.paymentStatus = getPaymentStatus(sale.amountPaid, getSaleTotal(sale));
 
         await sale.save();
       }
@@ -280,9 +355,29 @@ export const updatePaymentIn = async (req, res) => {
       date
     } = req.body;
 
-    const sanitizeObjectId = (value) => value ? value : undefined;
-    const cashBankAccountIdClean = sanitizeObjectId(cashBankAccountId);
-    const linkedInvoiceIdClean = sanitizeObjectId(linkedInvoiceId);
+    const newPartyId = partyId || payment.partyId;
+    const newPaymentMode = paymentMode || payment.paymentMode;
+    const cashBankAccountIdClean = isCashPaymentMode(newPaymentMode)
+      ? undefined
+      : cashBankAccountId !== undefined
+        ? sanitizeObjectId(cashBankAccountId)
+        : payment.cashBankAccountId;
+    const linkedInvoiceIdClean = linkedInvoiceId !== undefined
+      ? sanitizeObjectId(linkedInvoiceId)
+      : payment.linkedInvoiceId;
+    const newAmountReceived = amountReceived !== undefined
+      ? Number(amountReceived)
+      : Number(payment.amountReceived);
+
+    const paymentAmount = await validatePaymentInRequest({
+      partyId: newPartyId,
+      amountReceived: newAmountReceived,
+      paymentMode: newPaymentMode,
+      cashBankAccountId: cashBankAccountIdClean,
+      linkedInvoiceId: linkedInvoiceIdClean,
+      existingPayment: payment,
+      session,
+    });
 
     // 1. Revert Old Effects
     // Revert account balance
@@ -293,14 +388,14 @@ export const updatePaymentIn = async (req, res) => {
       oldAccount = await BankAccount.findOne({ accountType: 'cash', isDefault: true }).session(session);
     }
     if (oldAccount) {
-      oldAccount.currentBalance -= payment.amountReceived;
+      oldAccount.currentBalance -= Number(payment.amountReceived || 0);
       await oldAccount.save({ session, validateBeforeSave: false });
     }
 
     // Revert Customer wallet balance
     const oldCustomer = await Customer.findById(payment.partyId).session(session);
     if (oldCustomer) {
-      oldCustomer.walletBalance -= payment.amountReceived;
+      oldCustomer.walletBalance -= Number(payment.amountReceived || 0);
       await oldCustomer.save({ session });
     }
 
@@ -308,14 +403,8 @@ export const updatePaymentIn = async (req, res) => {
     if (payment.linkedInvoiceId) {
       const oldSale = await Sale.findById(payment.linkedInvoiceId).session(session);
       if (oldSale) {
-        oldSale.amountPaid -= payment.amountReceived;
-        if (oldSale.amountPaid <= 0) {
-          oldSale.paymentStatus = 'pending';
-        } else if (oldSale.amountPaid < oldSale.totalAmount) {
-          oldSale.paymentStatus = 'partial';
-        } else {
-          oldSale.paymentStatus = 'paid';
-        }
+        oldSale.amountPaid = Math.max(0, Number(oldSale.amountPaid || 0) - Number(payment.amountReceived || 0));
+        oldSale.paymentStatus = getPaymentStatus(oldSale.amountPaid, getSaleTotal(oldSale));
         await oldSale.save({ session });
       }
     }
@@ -325,14 +414,13 @@ export const updatePaymentIn = async (req, res) => {
     await PartyLedger.deleteOne({ referenceId: payment._id }).session(session);
 
     // 2. Apply New Effects
-    const newPartyId = partyId || payment.partyId;
     const newCustomer = await Customer.findById(newPartyId).session(session);
-    if (!newCustomer) throw new Error('Customer not found');
+    if (!newCustomer) throw makeValidationError('Customer not found');
 
     payment.partyId = newPartyId;
     payment.partyName = newCustomer.name;
-    payment.amountReceived = amountReceived;
-    payment.paymentMode = paymentMode;
+    payment.amountReceived = paymentAmount;
+    payment.paymentMode = newPaymentMode;
     payment.cashBankAccountId = cashBankAccountIdClean;
     payment.linkedInvoiceId = linkedInvoiceIdClean;
     payment.referenceNo = referenceNo;
@@ -342,18 +430,14 @@ export const updatePaymentIn = async (req, res) => {
 
     await payment.save({ session });
 
-    // Apply new Customer wallet balance
-    newCustomer.walletBalance += amountReceived;
-    await newCustomer.save({ session });
-
     // Apply new CashBank transaction
     await createCashBankTransaction({
       date: date || new Date(),
       type: 'payment_in',
       direction: 'in',
-      amount: amountReceived,
-      paymentMode,
-      accountType: cashBankAccountIdClean ? 'bank' : 'cash',
+      amount: paymentAmount,
+      paymentMode: newPaymentMode,
+      accountType: isCashPaymentMode(newPaymentMode) ? 'cash' : 'bank',
       accountId: cashBankAccountIdClean || undefined,
       partyId: newPartyId,
       partyType: 'Customer',
@@ -369,7 +453,7 @@ export const updatePaymentIn = async (req, res) => {
       partyId: newPartyId,
       partyType: 'Customer',
       type: 'payment_in',
-      creditAmount: amountReceived,
+      creditAmount: paymentAmount,
       referenceId: payment._id,
       receiptNo: payment.receiptNo,
       notes: description,
@@ -380,11 +464,8 @@ export const updatePaymentIn = async (req, res) => {
     if (linkedInvoiceIdClean) {
       const newSale = await Sale.findById(linkedInvoiceIdClean).session(session);
       if (newSale) {
-        const newAmountPaid = (newSale.amountPaid || 0) + Number(amountReceived);
-        let paymentStatus = 'partial';
-        if (newAmountPaid >= newSale.totalAmount) {
-          paymentStatus = 'paid';
-        }
+        const newAmountPaid = (newSale.amountPaid || 0) + paymentAmount;
+        const paymentStatus = getPaymentStatus(newAmountPaid, getSaleTotal(newSale));
         await Sale.findByIdAndUpdate(
           linkedInvoiceIdClean,
           { 
@@ -422,7 +503,7 @@ export const updatePaymentIn = async (req, res) => {
       emitSocketEvent('paymentIn:updated', {
         _id: payment._id,
         receiptNo: payment.receiptNo,
-        amountReceived,
+        amountReceived: paymentAmount,
         customerName: newCustomer.name
       });
     } catch (e) {
@@ -434,7 +515,7 @@ export const updatePaymentIn = async (req, res) => {
     if (session) {
       await session.abortTransaction();
     }
-    res.status(500).json({ success: false, message: error.message });
+    res.status(error.statusCode || 500).json({ success: false, message: error.message });
   } finally {
     if (session) {
       session.endSession();

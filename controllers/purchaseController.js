@@ -302,15 +302,25 @@ export const getPurchases = async (req, res, next) => {
       startDate,
       endDate,
       status,
+      paymentStatus,
+      supplier,
     } = req.query;
 
     const query = {};
 
     if (search) {
+      const matchingSuppliers = await Supplier.find({
+        name: { $regex: search, $options: 'i' },
+      }).select('_id');
+
       query.$or = [
         { purchaseNumber: { $regex: search, $options: 'i' } },
         { invoiceNumber: { $regex: search, $options: 'i' } },
       ];
+
+      if (matchingSuppliers.length > 0) {
+        query.$or.push({ supplier: { $in: matchingSuppliers.map((item) => item._id) } });
+      }
     }
 
     if (startDate || endDate) {
@@ -320,6 +330,8 @@ export const getPurchases = async (req, res, next) => {
     }
 
     if (status) query.status = status;
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (supplier) query.supplier = supplier;
 
     const total = await Purchase.countDocuments(query);
     const purchases = await Purchase.find(query)
