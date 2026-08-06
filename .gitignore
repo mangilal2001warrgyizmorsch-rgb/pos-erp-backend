@@ -29,3 +29,8 @@ logs/
 # Postman collection files
 pos-erp-collection.json
 pos-erp-collection.zip
+
+# API reference PDF & MD
+pos-erp-api-curl-document.pdf
+pos-erp-api-curl-document.zip
+pos-erp-api-curl-guide.md
