@@ -1,6 +1,6 @@
 import express from 'express';
 import { createLoan, getLoans, updateLoan, deleteLoan } from '../controllers/loanController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -8,10 +8,10 @@ router.use(protect);
 
 router.route('/')
   .get(getLoans)
-  .post(createLoan);
+  .post(authorize('admin', 'manager', 'accountant'), createLoan);
 
 router.route('/:id')
-  .put(updateLoan)
-  .delete(deleteLoan);
+  .put(authorize('admin', 'manager', 'accountant'), updateLoan)
+  .delete(authorize('admin', 'manager', 'accountant'), deleteLoan);
 
 export default router;

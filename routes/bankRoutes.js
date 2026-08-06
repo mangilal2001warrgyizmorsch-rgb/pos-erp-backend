@@ -8,7 +8,7 @@ import {
   updateBankAccount,
   deleteBankAccount 
 } from '../controllers/bankController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -16,15 +16,15 @@ router.use(protect);
 
 router.route('/')
   .get(getBankAccounts)
-  .post(createBankAccount);
+  .post(authorize('admin', 'accountant'), createBankAccount);
 
 router.route('/transaction')
   .get(getTransactions)
-  .post(createTransaction);
+  .post(authorize('admin', 'accountant'), createTransaction);
 
 router.route('/:id')
   .get(getBankAccountById)
-  .put(updateBankAccount)
-  .delete(deleteBankAccount);
+  .put(authorize('admin', 'accountant'), updateBankAccount)
+  .delete(authorize('admin', 'accountant'), deleteBankAccount);
 
 export default router;

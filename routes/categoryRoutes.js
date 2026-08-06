@@ -11,10 +11,10 @@ import { categoryValidator } from '../validators/index.js';
 
 router.use(protect);
 
-router.route('/').get(getCategories).post(authorize('admin'), categoryValidator, createCategory);
+router.route('/').get(getCategories).post(authorize('admin', 'manager', 'stock_manager'), categoryValidator, createCategory);
 router
   .route('/:id')
-  .put(authorize('admin'), updateCategory)
-  .delete(authorize('admin'), deleteCategory);
+  .put(authorize('admin', 'manager', 'stock_manager'), updateCategory)
+  .delete(authorize('admin', 'manager', 'stock_manager'), deleteCategory);
 
 export default router;

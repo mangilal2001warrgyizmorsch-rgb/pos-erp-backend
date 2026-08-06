@@ -10,7 +10,7 @@ import {
   getUnreturnedSalesForCustomer,
   getReturnableItemsFromSale,
 } from '../controllers/saleReturnController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 
 router.use(protect);
 
@@ -21,8 +21,8 @@ router.get('/customer/:customerId/unreturned', getUnreturnedSalesForCustomer);
 router.get('/invoice/:id/returnable-items', getReturnableItemsFromSale);
 
 // Main CRUD routes
-router.route('/').get(getSaleReturns).post(createSaleReturn);
-router.route('/:id').get(getSaleReturn).put(updateSaleReturn).delete(deleteSaleReturn);
-router.route('/:id/cancel').post(cancelSaleReturn);
+router.route('/').get(getSaleReturns).post(authorize('admin', 'manager'), createSaleReturn);
+router.route('/:id').get(getSaleReturn).put(authorize('admin', 'manager'), updateSaleReturn).delete(authorize('admin', 'manager'), deleteSaleReturn);
+router.route('/:id/cancel').post(authorize('admin', 'manager'), cancelSaleReturn);
 
 export default router;

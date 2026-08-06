@@ -7,14 +7,14 @@ import {
   updateCustomer,
   deleteCustomer,
 } from '../controllers/customerController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 import { customerValidator } from '../validators/index.js';
 
 router.use(protect);
 
 router.get('/search', getCustomers);
 
-router.route('/').get(getCustomers).post(customerValidator, createCustomer);
-router.route('/:id').get(getCustomer).put(updateCustomer).delete(deleteCustomer);
+router.route('/').get(getCustomers).post(authorize('admin', 'manager', 'cashier'), customerValidator, createCustomer);
+router.route('/:id').get(getCustomer).put(authorize('admin', 'manager'), updateCustomer).delete(authorize('admin', 'manager'), deleteCustomer);
 
 export default router;

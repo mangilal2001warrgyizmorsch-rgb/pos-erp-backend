@@ -12,7 +12,7 @@ import {
   getUnreturnedPurchasesForSupplier,
   getReturnableItemsFromPurchase,
 } from '../controllers/purchaseReturnController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 import { purchaseValidator } from '../validators/index.js';
 
 router.use(protect);
@@ -20,10 +20,10 @@ router.use(protect);
 router.get('/unpaid/:supplierId', getUnpaidPurchases);
 router.get('/supplier/:supplierId/unreturned', getUnreturnedPurchasesForSupplier);
 router.get('/:id/returnable-items', getReturnableItemsFromPurchase);
-router.route('/').get(getPurchases).post(purchaseValidator, createPurchase);
+router.route('/').get(getPurchases).post(authorize('admin', 'manager', 'stock_manager'), purchaseValidator, createPurchase);
 router.route('/:id')
   .get(getPurchase)
-  .put(updatePurchase)
-  .delete(deletePurchase);
+  .put(authorize('admin', 'manager', 'stock_manager'), updatePurchase)
+  .delete(authorize('admin', 'manager', 'stock_manager'), deletePurchase);
 
 export default router;

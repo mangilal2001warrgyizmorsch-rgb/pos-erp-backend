@@ -10,7 +10,7 @@ import {
   getUnreturnedPurchasesForSupplier,
   getReturnableItemsFromPurchase,
 } from '../controllers/purchaseReturnController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 
 router.use(protect);
 
@@ -21,8 +21,8 @@ router.get('/supplier/:supplierId/unreturned', getUnreturnedPurchasesForSupplier
 router.get('/bill/:id/returnable-items', getReturnableItemsFromPurchase);
 
 // Main CRUD routes
-router.route('/').get(getPurchaseReturns).post(createPurchaseReturn);
-router.route('/:id').get(getPurchaseReturn).put(updatePurchaseReturn).delete(deletePurchaseReturn);
-router.route('/:id/cancel').post(cancelPurchaseReturn);
+router.route('/').get(getPurchaseReturns).post(authorize('admin', 'manager', 'stock_manager'), createPurchaseReturn);
+router.route('/:id').get(getPurchaseReturn).put(authorize('admin', 'manager', 'stock_manager'), updatePurchaseReturn).delete(authorize('admin', 'manager', 'stock_manager'), deletePurchaseReturn);
+router.route('/:id/cancel').post(authorize('admin', 'manager', 'stock_manager'), cancelPurchaseReturn);
 
 export default router;

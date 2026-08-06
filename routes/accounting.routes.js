@@ -132,23 +132,23 @@ router.use(protect);
 
 router.get("/status", getStatus);
 router.get("/dashboard", getAccountingDashboard);
-router.post("/initialize", initializeAccountingFoundation);
+router.post("/initialize", authorize("admin", "accountant"), initializeAccountingFoundation);
 router.get("/chart-of-accounts", getChartOfAccountsController);
 router.get("/day-book", getDayBook);
 router.get("/health-check", getAccountingHealthCheckController);
 router.get("/audit-logs", getAccountingAuditLogsController);
-router.post("/journal/draft", authorize("admin"), createJournalDraftController);
-router.post("/journal/post", authorize("admin"), postJournalController);
-router.post("/test-voucher", authorize("admin"), createTestVoucherController);
-router.post("/repost/missing", authorize("admin"), repostMissingAccountingController);
-router.post("/repost/missing/batch", authorize("admin"), repostMissingAccountingBatchController);
-router.post("/repost/sale/:saleId", authorize("admin"), repostSaleAccountingController);
-router.post("/repost/purchase/:purchaseId", authorize("admin"), repostPurchaseAccountingController);
-router.post("/repost/sale-return/:returnId", authorize("admin"), repostSaleReturnAccountingController);
-router.post("/repost/purchase-return/:returnId", authorize("admin"), repostPurchaseReturnAccountingController);
-router.post("/repost/expense/:expenseId", authorize("admin"), repostExpenseAccountingController);
-router.post("/repost/cash-bank-transaction/:transactionId", authorize("admin"), repostCashBankTransactionAccountingController);
-router.post("/repost/bank-transfer/:transferId", authorize("admin"), repostBankTransferAccountingController);
+router.post("/journal/draft", authorize("admin", "accountant"), createJournalDraftController);
+router.post("/journal/post", authorize("admin", "accountant"), postJournalController);
+router.post("/test-voucher", authorize("admin", "accountant"), createTestVoucherController);
+router.post("/repost/missing", authorize("admin", "accountant"), repostMissingAccountingController);
+router.post("/repost/missing/batch", authorize("admin", "accountant"), repostMissingAccountingBatchController);
+router.post("/repost/sale/:saleId", authorize("admin", "accountant"), repostSaleAccountingController);
+router.post("/repost/purchase/:purchaseId", authorize("admin", "accountant"), repostPurchaseAccountingController);
+router.post("/repost/sale-return/:returnId", authorize("admin", "accountant"), repostSaleReturnAccountingController);
+router.post("/repost/purchase-return/:returnId", authorize("admin", "accountant"), repostPurchaseReturnAccountingController);
+router.post("/repost/expense/:expenseId", authorize("admin", "accountant"), repostExpenseAccountingController);
+router.post("/repost/cash-bank-transaction/:transactionId", authorize("admin", "accountant"), repostCashBankTransactionAccountingController);
+router.post("/repost/bank-transfer/:transferId", authorize("admin", "accountant"), repostBankTransferAccountingController);
 router.get("/trial-balance/basic", getBasicTrialBalance);
 router.get("/reports/dashboard", getAccountingReportDashboardController);
 router.get("/reports/trial-balance", getTrialBalanceReportController);
@@ -172,91 +172,91 @@ router.get("/gst/party-wise", getGSTPartyWiseReportController);
 router.get("/gst/exceptions", getGSTExceptionReportController);
 router.get("/gst/debug", getGSTDebugReportController);
 router.get("/reconciliation/ledgers", getLedgerReconciliationController);
-router.post("/reconciliation/ledgers/fix", authorize("admin"), fixLedgerReconciliationController);
+router.post("/reconciliation/ledgers/fix", authorize("admin", "accountant"), fixLedgerReconciliationController);
 router.get("/reconciliation/cash-bank", getCashBankReconciliationController);
 router.get("/reconciliation/cash-bank/details", getCashBankReconciliationDetailsController);
-router.post("/reconciliation/cash-bank/link-ledgers", authorize("admin"), linkCashBankLedgersController);
-router.post("/reconciliation/parties/link-ledgers", authorize("admin"), linkPartyLedgersController);
-router.post("/opening-balances/post-all", authorize("admin"), postOpeningBalancesController);
-router.post("/opening-balances/cash-bank/post-all", authorize("admin"), postCashBankOpeningBalancesController);
-router.post("/opening-balances/cash-bank/:accountId/post", authorize("admin"), postCashBankOpeningBalanceController);
+router.post("/reconciliation/cash-bank/link-ledgers", authorize("admin", "accountant"), linkCashBankLedgersController);
+router.post("/reconciliation/parties/link-ledgers", authorize("admin", "accountant"), linkPartyLedgersController);
+router.post("/opening-balances/post-all", authorize("admin", "accountant"), postOpeningBalancesController);
+router.post("/opening-balances/cash-bank/post-all", authorize("admin", "accountant"), postCashBankOpeningBalancesController);
+router.post("/opening-balances/cash-bank/:accountId/post", authorize("admin", "accountant"), postCashBankOpeningBalanceController);
 router.get("/reconciliation/parties", getPartyReconciliationController);
 router.get("/reconciliation/gst", getGSTReconciliationController);
 
 router
   .route("/groups")
   .get(getAccountGroups)
-  .post(createAccountGroup);
+  .post(authorize("admin", "accountant"), createAccountGroup);
 
 router
   .route("/groups/:id")
   .get(getAccountGroupById)
-  .put(updateAccountGroup)
-  .delete(deleteAccountGroup);
+  .put(authorize("admin", "accountant"), updateAccountGroup)
+  .delete(authorize("admin", "accountant"), deleteAccountGroup);
 
 router.get("/ledgers/code/:code", getLedgerByCodeController);
 router.get("/ledgers/group/:groupId", getLedgersByGroupController);
 router.get("/ledgers/system/:ledgerType", getSystemLedgerController);
 router.get("/ledgers/defaults", getDefaultLedgers);
-router.post("/ledgers/restore-defaults", authorize("admin"), restoreDefaultLedgersController);
+router.post("/ledgers/restore-defaults", authorize("admin", "accountant"), restoreDefaultLedgersController);
 router.get("/ledgers/:id/balance", getLedgerBalance);
 router.get("/ledgers/:id/statement", getLedgerStatement);
 
 router
   .route("/ledgers")
   .get(getLedgers)
-  .post(createLedgerController);
+  .post(authorize("admin", "accountant"), createLedgerController);
 
 router
   .route("/ledgers/:id")
   .get(getLedger)
-  .put(updateLedger)
-  .delete(deleteLedger);
+  .put(authorize("admin", "accountant"), updateLedger)
+  .delete(authorize("admin", "accountant"), deleteLedger);
 
 router
   .route("/voucher-types")
   .get(getVoucherTypes)
-  .post(createVoucherType);
+  .post(authorize("admin", "accountant"), createVoucherType);
 
 router
   .route("/voucher-types/:id")
   .get(getVoucherType)
-  .put(updateVoucherType)
-  .delete(deleteVoucherType);
+  .put(authorize("admin", "accountant"), updateVoucherType)
+  .delete(authorize("admin", "accountant"), deleteVoucherType);
 
 router.get("/vouchers", getVouchers);
-router.post("/vouchers/draft", createVoucher);
-router.post("/vouchers/post", directPostVoucherController);
-router.post("/vouchers", createVoucher);
+router.post("/vouchers/draft", authorize("admin", "accountant"), createVoucher);
+router.post("/vouchers/post", authorize("admin", "accountant"), directPostVoucherController);
+router.post("/vouchers", authorize("admin", "accountant"), createVoucher);
 
-router.post("/vouchers/:id/post", postVoucherController);
-router.post("/vouchers/:id/cancel", cancelVoucherController);
-router.post("/vouchers/:id/reverse", reverseVoucherController);
+router.post("/vouchers/:id/post", authorize("admin", "accountant"), postVoucherController);
+router.post("/vouchers/:id/cancel", authorize("admin", "accountant"), cancelVoucherController);
+router.post("/vouchers/:id/reverse", authorize("admin", "accountant"), reverseVoucherController);
 
 router
   .route("/vouchers/:id")
   .get(getVoucher)
-  .delete(deleteVoucher);
+  .delete(authorize("admin", "accountant"), deleteVoucher);
 
 router
   .route("/settings")
   .get(getAccountingSettings)
-  .put(updateAccountingSettings);
+  .put(authorize("admin", "accountant"), updateAccountingSettings);
 
 router.get("/settings/validate", validateAccountingSettingsController);
 
 // Bank Statement Import Routes
-router.post("/bank-statement/import", memoryUpload.single("file"), importStatement);
-router.post("/bank-statement/save", saveStatementAndMap);
-router.post("/bank-statement/:id/post-entries", postMappedEntries);
+router.post("/bank-statement/import", authorize("admin", "accountant"), memoryUpload.single("file"), importStatement);
+router.post("/bank-statement/save", authorize("admin", "accountant"), saveStatementAndMap);
+router.post("/bank-statement/:id/post-entries", authorize("admin", "accountant"), postMappedEntries);
 router.get("/bank-statement/history", getImportHistory);
 router.get("/bank-statement/settings", getSettings);
 
 // Bank Transaction Mapping Routes
 router.get("/bank-statement/mappings", getMappings);
-router.post("/bank-statement/mappings", createMapping);
-router.put("/bank-statement/mappings/:id", updateMapping);
-router.delete("/bank-statement/mappings/:id", deleteMapping);
+router.post("/bank-statement/mappings", authorize("admin", "accountant"), createMapping);
+router.put("/bank-statement/mappings/:id", authorize("admin", "accountant"), updateMapping);
+router.delete("/bank-statement/mappings/:id", authorize("admin", "accountant"), deleteMapping);
 
 // Dynamic routes
 router.get("/bank-statement/:id", getImportDetails);

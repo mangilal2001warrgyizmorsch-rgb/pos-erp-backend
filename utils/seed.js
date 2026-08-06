@@ -29,6 +29,27 @@ const seedData = async () => {
         phone: '1234567890',
       },
       {
+        name: 'Manager User',
+        email: 'manager@poserp.com',
+        password: 'manager123',
+        role: 'manager',
+        phone: '1122334455',
+      },
+      {
+        name: 'Accountant User',
+        email: 'accountant@poserp.com',
+        password: 'accountant123',
+        role: 'accountant',
+        phone: '5544332211',
+      },
+      {
+        name: 'Stock Manager User',
+        email: 'stock_manager@poserp.com',
+        password: 'stock_manager123',
+        role: 'stock_manager',
+        phone: '6677889900',
+      },
+      {
         name: 'Cashier User',
         email: 'cashier@poserp.com',
         password: 'cashier123',
