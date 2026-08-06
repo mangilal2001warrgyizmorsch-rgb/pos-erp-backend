@@ -1,10 +1,10 @@
 import StockMovement from '../models/StockMovement.js';
 import Product from '../models/Product.js';
-import StockBatch from '../models/StockBatch.js';
 import SalesPrice from '../models/SalesPrice.js';
 import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
 import { findOrCreateProductFromLineItem } from '../utils/productLineItem.js';
+import { inventoryService } from '../services/inventoryService.js';
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
@@ -129,53 +129,45 @@ export const createOpeningStockEntry = async (req, res, next) => {
       const currentProduct = await Product.findById(product._id).session(session);
       if (!currentProduct) throw new Error('Product not found while saving opening stock.');
 
-      const previousStock = Number(currentProduct.stock || 0);
-      const newStock = previousStock + quantity;
-      currentProduct.stock = newStock;
-      currentProduct.purchasePrice = purchasePrice;
-      currentProduct.salesPrice = salesPrice;
       currentProduct.taxRate = taxRate;
       currentProduct.openingStockPrice = purchasePrice;
       currentProduct.openingStockDate = openingStockDate || new Date();
       await currentProduct.save({ session });
 
       const batchNo = item.batchNo || `${reference}-${currentProduct._id.toString().slice(-4).toUpperCase()}`;
-      const [batch] = await StockBatch.create([{
+      const { batch } = await inventoryService.addStock({
         productId: currentProduct._id,
         batchNo,
         quantity,
-        availableQty: quantity,
         purchasePrice,
         taxPercent: taxRate,
         salePrice: salesPrice,
+        sourceType: 'opening_stock',
         barcode: currentProduct.barcode || currentProduct.sku,
-      }], { session });
-
-      await SalesPrice.create([{
-        productId: currentProduct._id,
-        batchId: batch._id,
-        barcode: currentProduct.barcode || currentProduct.sku,
-        purchasePrice,
-        taxPercent: taxRate,
-        calculatedSalePrice: salesPrice,
-        availableQty: quantity,
-        pricingStatus: 'active',
-      }], { session });
-
-      await StockMovement.create([{
-        product: currentProduct._id,
-        productName: currentProduct.name,
-        type: 'adjustment',
-        quantity,
-        previousStock,
-        newStock,
         reference,
         notes: notes || 'Opening stock entry',
         createdBy: req.user._id,
-      }], { session });
+      }, session);
+
+      await SalesPrice.updateOne(
+        { batchId: batch._id },
+        {
+          $set: {
+            productId: currentProduct._id,
+            barcode: currentProduct.barcode || currentProduct.sku,
+            purchasePrice,
+            taxPercent: taxRate,
+            calculatedSalePrice: salesPrice,
+            pricingStatus: 'active',
+          },
+          $inc: { availableQty: quantity },
+        },
+        { upsert: true, session },
+      );
 
       savedItems.push({
         product: currentProduct._id,
+        batchId: batch._id,
         productId: currentProduct._id,
         itemName: currentProduct.name,
         productName: currentProduct.name,

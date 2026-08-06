@@ -5,6 +5,7 @@ import Purchase from "../../models/Purchase.js";
 import PurchaseReturn from "../../models/PurchaseReturn.js";
 import Sale from "../../models/Sale.js";
 import SalesReturn from "../../models/SalesReturn.js";
+import Expense from "../../models/Expense.js";
 import BusinessProfile from "../../models/BusinessProfile.js";
 import Voucher from "../../models/accounting/Voucher.model.js";
 import VoucherEntry from "../../models/accounting/VoucherEntry.model.js";
@@ -110,6 +111,28 @@ const getPurchaseReturnDocs = (filters = {}) => PurchaseReturn.find({
   ...dateFilter("returnDate", filters),
 }).lean();
 
+const getIncomeExpenseGSTDocs = (entryType, filters = {}) => Expense.find({
+  entryType,
+  status: { $ne: "cancelled" },
+  gstApplicable: true,
+  gstAmount: { $gt: 0 },
+  ...dateFilter("date", filters),
+}).sort({ date: 1, createdAt: 1 }).lean();
+
+const incomeExpenseGSTBucket = (entry) => {
+  const taxableAmount = roundMoney(entry.taxableAmount || entry.amount);
+  const totalTax = roundMoney(entry.gstAmount);
+  const split = calculateGSTSplit(totalTax, entry.gstType === "igst" ? "inter" : "intra");
+  return {
+    taxableAmount,
+    cgst: split.cgst,
+    sgst: split.sgst,
+    igst: split.igst,
+    totalTax,
+    totalValue: roundMoney(entry.totalAmount || taxableAmount + totalTax),
+  };
+};
+
 const getProductMap = async (docs) => {
   const ids = new Set();
   docs.forEach((doc) => (doc.items || []).forEach((item) => {
@@ -121,11 +144,16 @@ const getProductMap = async (docs) => {
 
 export const getOutputGSTReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const [sales, gstContext] = await Promise.all([getSalesDocs(filters), getGSTContext()]);
-  const rows = sales.map((sale) => {
+  const [sales, incomeEntries, gstContext] = await Promise.all([
+    getSalesDocs(filters),
+    getIncomeExpenseGSTDocs("income", filters),
+    getGSTContext(),
+  ]);
+  const salesRows = sales.map((sale) => {
     const customerGSTIN = normalizeGSTIN(sale.customer?.gstNumber);
     const bucket = docTaxBucket(sale, gstContext);
     return {
+      source: "Sales",
       date: sale.createdAt,
       invoiceNo: sale.invoiceNumber,
       customerName: sale.customerName || sale.customer?.name || "Walk-in Customer",
@@ -140,6 +168,25 @@ export const getOutputGSTReport = async (filters = {}) => {
       invoiceTotal: bucket.totalValue,
     };
   });
+  const incomeRows = incomeEntries.map((entry) => {
+    const bucket = incomeExpenseGSTBucket(entry);
+    return {
+      source: "Income",
+      date: entry.date,
+      invoiceNo: entry.reference || String(entry._id).slice(-8).toUpperCase(),
+      customerName: entry.title,
+      customerGSTIN: "",
+      invoiceType: "B2C",
+      stateOfSupply: "",
+      taxableAmount: bucket.taxableAmount,
+      cgst: bucket.cgst,
+      sgst: bucket.sgst,
+      igst: bucket.igst,
+      totalTax: bucket.totalTax,
+      invoiceTotal: bucket.totalValue,
+    };
+  });
+  const rows = [...salesRows, ...incomeRows];
   const totals = rows.reduce((acc, row) => addGSTBucket(acc, { ...row, totalValue: row.invoiceTotal }), makeEmptyGSTBucket());
   const byInvoiceType = rows.reduce((acc, row) => {
     acc[row.invoiceType] = acc[row.invoiceType] || makeEmptyGSTBucket();
@@ -151,11 +198,16 @@ export const getOutputGSTReport = async (filters = {}) => {
 
 export const getInputGSTReport = async (filters = {}) => {
   const settings = await getGSTSettings();
-  const [purchases, gstContext] = await Promise.all([getPurchaseDocs(filters), getGSTContext()]);
-  const rows = purchases.map((purchase) => {
+  const [purchases, expenseEntries, gstContext] = await Promise.all([
+    getPurchaseDocs(filters),
+    getIncomeExpenseGSTDocs("expense", filters),
+    getGSTContext(),
+  ]);
+  const purchaseRows = purchases.map((purchase) => {
     const supplierGSTIN = normalizeGSTIN(purchase.supplier?.gstNumber);
     const bucket = docTaxBucket(purchase, gstContext);
     return {
+      source: "Purchase",
       date: purchase.purchaseDate,
       billNo: purchase.purchaseNumber,
       supplierName: purchase.supplierName || purchase.supplier?.name || "Supplier",
@@ -171,6 +223,26 @@ export const getInputGSTReport = async (filters = {}) => {
       warning: supplierGSTIN ? "" : "Supplier GSTIN missing",
     };
   });
+  const expenseRows = expenseEntries.map((entry) => {
+    const bucket = incomeExpenseGSTBucket(entry);
+    return {
+      source: "Expense",
+      date: entry.date,
+      billNo: entry.reference || String(entry._id).slice(-8).toUpperCase(),
+      supplierName: entry.title,
+      supplierGSTIN: "",
+      stateOfSupply: "",
+      taxableAmount: bucket.taxableAmount,
+      cgst: bucket.cgst,
+      sgst: bucket.sgst,
+      igst: bucket.igst,
+      totalTax: bucket.totalTax,
+      billTotal: bucket.totalValue,
+      itcEligible: true,
+      warning: "",
+    };
+  });
+  const rows = [...purchaseRows, ...expenseRows];
   const totals = rows.reduce((acc, row) => addGSTBucket(acc, { ...row, totalValue: row.billTotal }), makeEmptyGSTBucket());
   return { reportName: "Input GST Report", period: getPeriod(filters), ...settings, rows, totals };
 };

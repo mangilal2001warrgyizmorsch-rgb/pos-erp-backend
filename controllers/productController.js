@@ -5,6 +5,62 @@ import StockMovement from '../models/StockMovement.js';
 import Category from '../models/Category.js';
 import { GLOBAL_LIBRARY } from '../constants/globalLibrary.js';
 
+const formatPriceOptions = (product, batches = []) => {
+  const activeBatches = batches
+    .filter((batch) => Number(batch.availableQty || 0) > 0 && batch.isActive !== false)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  return activeBatches.map((batch, index) => ({
+    batchId: batch._id,
+    batchNo: batch.batchNo,
+    label: index === 0 ? 'Current Stock' : 'Old Stock',
+    isCurrent: index === 0,
+    salePrice: Number(batch.salePrice || product.salesPrice || 0),
+    salesPrice: Number(batch.salePrice || product.salesPrice || 0),
+    mrp: Number(batch.salePrice || product.salesPrice || 0),
+    availableQty: Number(batch.availableQty || 0),
+    purchasePrice: Number(batch.purchasePrice || 0),
+    taxPercent: Number(batch.taxPercent ?? product.taxRate ?? 0),
+    taxRate: Number(batch.taxPercent ?? product.taxRate ?? 0),
+    barcode: batch.barcode || product.barcode || product.sku,
+    sourceType: batch.sourceType || 'purchase',
+    createdAt: batch.createdAt,
+  }));
+};
+
+const getProductPricePayload = async (product) => {
+  const batches = await StockBatch.find({
+    productId: product._id,
+    isActive: { $ne: false },
+    availableQty: { $gt: 0 },
+  }).sort({ createdAt: -1 });
+  const priceOptions = formatPriceOptions(product, batches);
+  const fallbackPrice = Number(product.salesPrice || product.purchasePrice || 0);
+  const defaultPrice = priceOptions[0] || {
+    batchId: null,
+    batchNo: 'PRODUCT-MASTER',
+    label: 'Current Price',
+    isCurrent: true,
+    salePrice: fallbackPrice,
+    salesPrice: fallbackPrice,
+    mrp: fallbackPrice,
+    availableQty: Number(product.stock || 0),
+    purchasePrice: Number(product.purchasePrice || 0),
+    taxPercent: Number(product.taxRate || 0),
+    taxRate: Number(product.taxRate || 0),
+    barcode: product.barcode || product.sku,
+    sourceType: 'legacy',
+    createdAt: product.updatedAt || product.createdAt,
+  };
+
+  return {
+    product,
+    priceOptions,
+    defaultPrice,
+    priceSelectionRequired: priceOptions.length > 1,
+  };
+};
+
 // @desc    Get all products
 // @route   GET /api/products
 export const getProducts = async (req, res, next) => {
@@ -142,6 +198,32 @@ export const getProductPricing = async (req, res, next) => {
   }
 };
 
+// @desc    Get available stock price batches for product
+// @route   GET /api/products/:id/price-options
+export const getProductPriceOptions = async (req, res, next) => {
+  try {
+    const product = await Product.findOne({ _id: req.params.id, isActive: true });
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found',
+      });
+    }
+
+    const payload = await getProductPricePayload(product);
+    res.status(200).json({
+      success: true,
+      product: payload.product,
+      priceOptions: payload.priceOptions,
+      defaultPrice: payload.defaultPrice,
+      priceSelectionRequired: payload.priceSelectionRequired,
+      data: payload,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Get single product by barcode (for fast scanning)
 // @route   GET /api/products/barcode/:barcode
 export const getProductByBarcode = async (req, res, next) => {
@@ -156,9 +238,15 @@ export const getProductByBarcode = async (req, res, next) => {
       });
     }
 
+    const payload = await getProductPricePayload(product);
     res.status(200).json({
       success: true,
-      data: product,
+      data: {
+        ...product.toObject(),
+        priceOptions: payload.priceOptions,
+        defaultPrice: payload.defaultPrice,
+        priceSelectionRequired: payload.priceSelectionRequired,
+      },
     });
   } catch (error) {
     next(error);

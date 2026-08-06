@@ -100,7 +100,31 @@ import {
   getVoucherTypes,
   updateVoucherType,
 } from "../controllers/accounting/voucherType.controller.js";
+import {
+  importStatement,
+  saveStatementAndMap,
+  postMappedEntries,
+  getImportHistory,
+  getImportDetails
+} from "../controllers/accounting/bankStatementImport.controller.js";
+import {
+  getMappings,
+  createMapping,
+  updateMapping,
+  deleteMapping
+} from "../controllers/accounting/bankTransactionMapping.controller.js";
+import {
+  getSettings,
+  updateSettings
+} from "../controllers/accounting/bankImportSettings.controller.js";
 import { authorize, protect } from "../middleware/auth.js";
+import multer from "multer";
+
+const memoryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
 
 const router = express.Router();
 
@@ -220,5 +244,21 @@ router
   .put(updateAccountingSettings);
 
 router.get("/settings/validate", validateAccountingSettingsController);
+
+// Bank Statement Import Routes
+router.post("/bank-statement/import", memoryUpload.single("file"), importStatement);
+router.post("/bank-statement/save", saveStatementAndMap);
+router.post("/bank-statement/:id/post-entries", postMappedEntries);
+router.get("/bank-statement/history", getImportHistory);
+router.get("/bank-statement/settings", getSettings);
+
+// Bank Transaction Mapping Routes
+router.get("/bank-statement/mappings", getMappings);
+router.post("/bank-statement/mappings", createMapping);
+router.put("/bank-statement/mappings/:id", updateMapping);
+router.delete("/bank-statement/mappings/:id", deleteMapping);
+
+// Dynamic routes
+router.get("/bank-statement/:id", getImportDetails);
 
 export default router;

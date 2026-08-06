@@ -132,7 +132,7 @@ export const createPurchase = async (req, res, next) => {
       const product = resolved.product;
       const productId = resolved.productId;
 
-      finalItems.push({
+      const finalItem = {
         ...item,
         product: productId,
         productId,
@@ -150,7 +150,7 @@ export const createPurchase = async (req, res, next) => {
         taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
         hsn: item.hsn || item.hsnCode || resolved.hsnCode,
         hsnCode: resolved.hsnCode,
-      });
+      };
 
       if (confirmedReceipt) {
         const batchNo = item.batchNo || `BATCH-${Date.now()}-${productId.toString().slice(-4)}`;
@@ -172,25 +172,32 @@ export const createPurchase = async (req, res, next) => {
           notes: `Purchase receipt: ${purchaseNumber}`,
           createdBy: req.user._id
         }, session);
+        finalItem.batchId = batch._id;
 
         // SalesPrice Entry for billing strategies
-        await SalesPrice.create([{
-          productId: productId,
-          purchaseId: purchase._id,
-          batchId: batch._id,
-          barcode: resolved.barcode || productId.toString(),
-          purchasePrice: item.purchasePrice || 0,
-          taxPercent: item.taxRate || 0,
-          taxAmount: item.taxAmount || 0,
-          discountPercent: item.discount || 0,
-          discountAmount: item.discountAmount || 0,
-          extraCharges: shippingCharges || 0,
-          extraChargePerProduct: shippingPerItem,
-          calculatedSalePrice: item.salesPrice || 0,
-          availableQty: item.quantity,
-          pricingStatus: 'active',
-        }], { session });
+        await SalesPrice.updateOne(
+          { batchId: batch._id },
+          {
+            $set: {
+              productId: productId,
+              purchaseId: purchase._id,
+              barcode: resolved.barcode || productId.toString(),
+              purchasePrice: item.purchasePrice || 0,
+              taxPercent: item.taxRate || 0,
+              taxAmount: item.taxAmount || 0,
+              discountPercent: item.discount || 0,
+              discountAmount: item.discountAmount || 0,
+              extraCharges: shippingCharges || 0,
+              extraChargePerProduct: shippingPerItem,
+              calculatedSalePrice: item.salesPrice || 0,
+              pricingStatus: 'active',
+            },
+            $inc: { availableQty: Number(item.quantity || 0) },
+          },
+          { upsert: true, session }
+        );
       }
+      finalItems.push(finalItem);
     }
 
     purchase.items = finalItems;
@@ -441,12 +448,31 @@ export const deletePurchase = async (req, res, next) => {
             notes: 'Purchase deleted',
             createdBy: req.user._id,
           }, session);
+
+          if (item.batchId) {
+            const batch = await StockBatch.findById(item.batchId).session(session);
+            if (batch) {
+              batch.quantity = Math.max(0, Number(batch.quantity || 0) - Number(item.quantity || 0));
+              batch.availableQty = Math.max(0, Number(batch.availableQty || 0) - Number(item.quantity || 0));
+              if (batch.quantity <= 0 && batch.availableQty <= 0) batch.isActive = false;
+              await batch.save({ session });
+              await SalesPrice.updateMany(
+                { batchId: batch._id },
+                {
+                  $inc: { availableQty: -Number(item.quantity || 0) },
+                  ...(batch.isActive === false ? { $set: { pricingStatus: 'inactive' } } : {}),
+                },
+              ).session(session);
+            }
+          }
         }
       }
 
-      // Delete associated StockBatch and SalesPrice documents
-      await StockBatch.deleteMany({ purchaseId: purchase._id }).session(session);
-      await SalesPrice.deleteMany({ purchaseId: purchase._id }).session(session);
+      // Legacy purchases did not store item.batchId; keep their old cleanup path.
+      if (purchase.items.some((item) => !item.batchId)) {
+        await StockBatch.deleteMany({ purchaseId: purchase._id }).session(session);
+        await SalesPrice.deleteMany({ purchaseId: purchase._id }).session(session);
+      }
 
       // Revert Supplier totalPurchases, outstanding balance, and ledger
       if (purchase.supplier) {
@@ -558,9 +584,27 @@ export const updatePurchase = async (req, res, next) => {
           product.stock = (product.stock || 0) - item.quantity;
           await product.save({ session });
         }
+        if (item.batchId) {
+          const batch = await StockBatch.findById(item.batchId).session(session);
+          if (batch) {
+            batch.quantity = Math.max(0, Number(batch.quantity || 0) - Number(item.quantity || 0));
+            batch.availableQty = Math.max(0, Number(batch.availableQty || 0) - Number(item.quantity || 0));
+            if (batch.quantity <= 0 && batch.availableQty <= 0) batch.isActive = false;
+            await batch.save({ session });
+            await SalesPrice.updateMany(
+              { batchId: batch._id },
+              {
+                $inc: { availableQty: -Number(item.quantity || 0) },
+                ...(batch.isActive === false ? { $set: { pricingStatus: 'inactive' } } : {}),
+              },
+            ).session(session);
+          }
+        }
       }
-      await StockBatch.deleteMany({ purchaseId: purchase._id }).session(session);
-      await SalesPrice.deleteMany({ purchaseId: purchase._id }).session(session);
+      if (purchase.items.some((item) => !item.batchId)) {
+        await StockBatch.deleteMany({ purchaseId: purchase._id }).session(session);
+        await SalesPrice.deleteMany({ purchaseId: purchase._id }).session(session);
+      }
 
       if (purchase.supplier) {
         await Supplier.findByIdAndUpdate(
@@ -607,7 +651,7 @@ export const updatePurchase = async (req, res, next) => {
       const product = resolved.product;
       const productId = resolved.productId;
 
-      finalItems.push({
+      const finalItem = {
         ...item,
         product: productId,
         productId,
@@ -625,7 +669,7 @@ export const updatePurchase = async (req, res, next) => {
         taxAmount: item.taxAmount ?? (Number(item.cgst || 0) + Number(item.sgst || 0) + Number(item.igst || 0)),
         hsn: item.hsn || item.hsnCode || resolved.hsnCode,
         hsnCode: resolved.hsnCode,
-      });
+      };
 
       if (newConfirmedReceipt) {
         const batchNo = item.batchNo || `BATCH-${Date.now()}-${productId.toString().slice(-4)}`;
@@ -646,24 +690,31 @@ export const updatePurchase = async (req, res, next) => {
           notes: `Purchase receipt updated: ${purchase.purchaseNumber}`,
           createdBy: req.user._id
         }, session);
+        finalItem.batchId = batch._id;
 
-        await SalesPrice.create([{
-          productId: productId,
-          purchaseId: purchase._id,
-          batchId: batch._id,
-          barcode: resolved.barcode || productId.toString(),
-          purchasePrice: item.purchasePrice || 0,
-          taxPercent: item.taxRate || 0,
-          taxAmount: item.taxAmount || 0,
-          discountPercent: item.discount || 0,
-          discountAmount: item.discountAmount || 0,
-          extraCharges: shippingCharges || 0,
-          extraChargePerProduct: shippingPerItem,
-          calculatedSalePrice: item.salesPrice || 0,
-          availableQty: item.quantity,
-          pricingStatus: 'active',
-        }], { session });
+        await SalesPrice.updateOne(
+          { batchId: batch._id },
+          {
+            $set: {
+              productId: productId,
+              purchaseId: purchase._id,
+              barcode: resolved.barcode || productId.toString(),
+              purchasePrice: item.purchasePrice || 0,
+              taxPercent: item.taxRate || 0,
+              taxAmount: item.taxAmount || 0,
+              discountPercent: item.discount || 0,
+              discountAmount: item.discountAmount || 0,
+              extraCharges: shippingCharges || 0,
+              extraChargePerProduct: shippingPerItem,
+              calculatedSalePrice: item.salesPrice || 0,
+              pricingStatus: 'active',
+            },
+            $inc: { availableQty: Number(item.quantity || 0) },
+          },
+          { upsert: true, session }
+        );
       }
+      finalItems.push(finalItem);
     }
 
     // Update the purchase record in-place

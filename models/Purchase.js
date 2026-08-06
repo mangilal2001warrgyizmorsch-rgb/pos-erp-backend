@@ -99,6 +99,10 @@ const purchaseItemSchema = new mongoose.Schema({
     required: true,
     min: 0,
   },
+  batchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'StockBatch',
+  },
   total: {
     type: Number,
     required: true,

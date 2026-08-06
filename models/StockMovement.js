@@ -41,6 +41,14 @@ const stockMovementSchema = new mongoose.Schema(
     referenceId: {
       type: mongoose.Schema.Types.ObjectId, // Sale ID or Purchase ID
     },
+    batchId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'StockBatch',
+    },
+    salePrice: {
+      type: Number,
+      default: 0,
+    },
     notes: {
       type: String,
       trim: true,
@@ -57,6 +65,7 @@ const stockMovementSchema = new mongoose.Schema(
 );
 
 stockMovementSchema.index({ product: 1, createdAt: -1 });
+stockMovementSchema.index({ batchId: 1, createdAt: -1 });
 stockMovementSchema.index({ type: 1, createdAt: -1 });
 stockMovementSchema.index({ reference: 1 });
 

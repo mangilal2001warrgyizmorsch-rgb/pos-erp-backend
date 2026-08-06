@@ -3,6 +3,7 @@ import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
 import StockBatch from '../models/StockBatch.js';
 import StockMovement from '../models/StockMovement.js';
+import SalesPrice from '../models/SalesPrice.js';
 import mongoose from 'mongoose';
 import { generateSequenceNumber } from '../utils/sequenceGenerator.js';
 import { createCashBankTransaction, reverseReferenceTransaction } from '../services/cashBankTransactionService.js';
@@ -135,9 +136,10 @@ const buildCustomSaleItem = (item, stateOfSupply) => {
 };
 
 const buildInventorySaleItem = async (item, stateOfSupply, invoiceNumber, referenceId, req, session) => {
-  const product = await Product.findOne({ _id: item.product, isActive: true }).session(session);
+  const productId = item.product || item.productId;
+  const product = await Product.findOne({ _id: productId, isActive: true }).session(session);
   if (!product) {
-    throw new Error(`Product not found: ${item.product}`);
+    throw new Error(`Product not found: ${productId}`);
   }
 
   const quantity = Number(item.quantity || 0);
@@ -147,31 +149,28 @@ const buildInventorySaleItem = async (item, stateOfSupply, invoiceNumber, refere
     throw new Error(`Insufficient stock for product ${product.name}. Available: ${product.stock}, Requested: ${quantity}`);
   }
 
-  const batches = await StockBatch.find({
-    productId: item.product,
-    availableQty: { $gt: 0 }
-  }).sort({ createdAt: 1 }).session(session);
+  const activeBatchCount = await StockBatch.countDocuments({
+    productId: product._id,
+    isActive: { $ne: false },
+    availableQty: { $gt: 0 },
+  }).session(session);
 
-  let remainingToDeduct = quantity;
-  let totalPurchaseCost = 0;
-
-  for (const batch of batches) {
-    if (remainingToDeduct <= 0) break;
-    const deductQty = Math.min(batch.availableQty, remainingToDeduct);
-    totalPurchaseCost += deductQty * batch.purchasePrice;
-    remainingToDeduct -= deductQty;
+  if (activeBatchCount > 1 && !item.batchId) {
+    throw new Error(`Please select selling price for ${product.name}.`);
   }
 
-  const avgPurchasePrice = quantity > 0 ? totalPurchaseCost / quantity : 0;
-
-  await inventoryService.deductStock({
-    productId: item.product,
+  const deduction = await inventoryService.deductStock({
+    productId: product._id,
+    batchId: item.batchId,
     quantity,
     reference: invoiceNumber,
     referenceId,
     notes: referenceId ? `Updated Sale invoice ${invoiceNumber}` : `Sale invoice ${invoiceNumber}`,
     createdBy: req.user._id
   }, session);
+  const selectedBatch = deduction.batch;
+  const totalPurchaseCost = deduction.purchaseCost ?? Number(product.purchasePrice || 0) * quantity;
+  const avgPurchasePrice = quantity > 0 ? totalPurchaseCost / quantity : 0;
 
   const rate = getItemRate(item);
   const itemTax = normalizeSaleItemTax({ ...item, quantity, unitPrice: rate }, stateOfSupply);
@@ -184,7 +183,12 @@ const buildInventorySaleItem = async (item, stateOfSupply, invoiceNumber, refere
     description: item.description,
     sku: product.sku,
     quantity,
+    batchId: selectedBatch?._id || item.batchId || undefined,
     unitPrice: rate,
+    salePrice: rate,
+    mrp: Number(item.mrp ?? item.salePrice ?? rate),
+    selectedPriceType: item.selectedPriceType || (selectedBatch ? 'batch' : 'product_master'),
+    availableQtyAtSale: Number(item.availableQty ?? selectedBatch?.availableQty ?? 0) + quantity,
     rate,
     discount: getItemDiscount(item),
     purchasePrice: avgPurchasePrice,
@@ -548,6 +552,14 @@ export const cancelSale = async (req, res, next) => {
       );
 
       if (product) {
+        const batch = item.batchId
+          ? await StockBatch.findById(item.batchId)
+          : await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 });
+        if (batch) {
+          batch.availableQty += item.quantity;
+          await batch.save();
+          await SalesPrice.updateMany({ batchId: batch._id }, { $inc: { availableQty: item.quantity } });
+        }
         await recordStockMovement({
           productId: product._id,
           productName: product.name,
@@ -557,6 +569,8 @@ export const cancelSale = async (req, res, next) => {
           newStock: product.stock,
           reference: sale.invoiceNumber,
           referenceId: sale._id,
+          batchId: batch?._id,
+          salePrice: item.salePrice || item.unitPrice || item.rate || 0,
           notes: 'Sale cancelled',
           createdBy: req.user._id,
         });
@@ -860,6 +874,15 @@ export const deleteSale = async (req, res, next) => {
       );
 
       if (product) {
+        const batch = item.batchId
+          ? await StockBatch.findById(item.batchId).session(session)
+          : await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        if (batch) {
+          batch.availableQty += item.quantity;
+          await batch.save({ session });
+          await SalesPrice.updateMany({ batchId: batch._id }, { $inc: { availableQty: item.quantity } }).session(session);
+        }
+
         await recordStockMovement({
           productId: product._id,
           productName: product.name,
@@ -869,16 +892,11 @@ export const deleteSale = async (req, res, next) => {
           newStock: product.stock,
           reference: sale.invoiceNumber,
           referenceId: sale._id,
+          batchId: batch?._id,
+          salePrice: item.salePrice || item.unitPrice || item.rate || 0,
           notes: 'Sale deleted',
           createdBy: req.user._id,
         }, session);
-
-        // Restore batch quantities
-        let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
-        if (batch) {
-          batch.availableQty += item.quantity;
-          await batch.save({ session });
-        }
       }
     }
 
@@ -993,10 +1011,13 @@ export const updateSale = async (req, res, next) => {
         { new: true, session }
       );
       if (product) {
-        let batch = await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
+        let batch = item.batchId
+          ? await StockBatch.findById(item.batchId).session(session)
+          : await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
         if (batch) {
           batch.availableQty += item.quantity;
           await batch.save({ session });
+          await SalesPrice.updateMany({ batchId: batch._id }, { $inc: { availableQty: item.quantity } }).session(session);
         }
       }
     }

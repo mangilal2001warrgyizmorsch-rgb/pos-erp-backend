@@ -9,6 +9,7 @@ import {
   getProductStats,
   getProductByBarcode,
   getProductPricing,
+  getProductPriceOptions,
   bulkImportProducts,
   getGlobalLibrary,
 } from '../controllers/productController.js';
@@ -21,6 +22,7 @@ router.post('/bulk-import', authorize('admin'), bulkImportProducts);
 router.get('/global-library', getGlobalLibrary);
 router.get('/stats/overview', getProductStats);
 router.get('/barcode/:barcode', getProductByBarcode);
+router.get('/:id/price-options', getProductPriceOptions);
 router.get('/:id/pricing', getProductPricing);
 router.route('/').get(getProducts).post(authorize('admin'), productValidator, createProduct);
 router

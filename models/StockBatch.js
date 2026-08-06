@@ -11,6 +11,14 @@ const stockBatchSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Purchase',
     },
+    sourceType: {
+      type: String,
+      enum: ['opening_stock', 'purchase', 'manual_adjustment', 'return', 'legacy'],
+      default: 'purchase',
+    },
+    sourceId: {
+      type: mongoose.Schema.Types.ObjectId,
+    },
     batchNo: {
       type: String,
       required: true,
@@ -56,6 +64,10 @@ const stockBatchSchema = new mongoose.Schema(
     barcode: {
       type: String,
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,
@@ -64,6 +76,7 @@ const stockBatchSchema = new mongoose.Schema(
 
 // Indexes
 stockBatchSchema.index({ productId: 1, availableQty: 1 });
+stockBatchSchema.index({ productId: 1, salePrice: 1, purchasePrice: 1, isActive: 1 });
 stockBatchSchema.index({ batchNo: 1 });
 stockBatchSchema.index({ createdAt: 1 }); // For FIFO/LIFO logic
 

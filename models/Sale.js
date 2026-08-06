@@ -48,6 +48,26 @@ const saleItemSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  batchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'StockBatch',
+  },
+  salePrice: {
+    type: Number,
+    default: 0,
+  },
+  mrp: {
+    type: Number,
+    default: 0,
+  },
+  selectedPriceType: {
+    type: String,
+    trim: true,
+  },
+  availableQtyAtSale: {
+    type: Number,
+    default: 0,
+  },
   rate: {
     type: Number,
     default: 0,

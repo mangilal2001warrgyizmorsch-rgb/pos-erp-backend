@@ -26,6 +26,8 @@ export const recordStockMovement = async (params, session = null) => {
     newStock: params.newStock,
     reference: params.reference,
     referenceId: params.referenceId,
+    batchId: params.batchId,
+    salePrice: params.salePrice,
     notes: params.notes,
     createdBy: params.createdBy,
   });

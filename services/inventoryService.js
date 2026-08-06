@@ -1,6 +1,7 @@
 import Product from '../models/Product.js';
 import StockBatch from '../models/StockBatch.js';
 import StockMovement from '../models/StockMovement.js';
+import SalesPrice from '../models/SalesPrice.js';
 import { emitSocketEvent } from '../utils/socket.js';
 
 export const inventoryService = {
@@ -19,6 +20,7 @@ export const inventoryService = {
     salePrice,
     expiryDate,
     barcode,
+    sourceType = purchaseId ? 'purchase' : 'manual_adjustment',
     reference,
     notes,
     createdBy
@@ -30,39 +32,65 @@ export const inventoryService = {
     const previousStock = product.stock || 0;
     const newStock = previousStock + Number(quantity);
 
-    // 2. Create StockBatch
-    const batch = new StockBatch({
+    const quantityToAdd = Number(quantity);
+    const nextPurchasePrice = Number(purchasePrice || 0);
+    const nextSalePrice = Number(salePrice || product.salesPrice || purchasePrice || 0);
+
+    // 2. Merge only same product + same purchase price + same sale price.
+    let batch = await StockBatch.findOne({
       productId,
-      purchaseId,
-      batchNo: batchNo || `BATCH-${Date.now()}`,
-      quantity: Number(quantity),
-      availableQty: Number(quantity),
-      purchasePrice: Number(purchasePrice),
-      taxPercent: Number(taxPercent),
-      discountPercent: Number(discountPercent),
-      extraChargePerProduct: Number(extraChargePerProduct),
-      salePrice: Number(salePrice || product.salesPrice || purchasePrice),
-      expiryDate,
-      barcode: barcode || product.barcode
-    });
-    await batch.save({ session });
+      isActive: { $ne: false },
+      purchasePrice: nextPurchasePrice,
+      salePrice: nextSalePrice,
+      expiryDate: expiryDate || null,
+    }).sort({ createdAt: -1 }).session(session);
+
+    if (batch) {
+      batch.quantity += quantityToAdd;
+      batch.availableQty += quantityToAdd;
+      batch.taxPercent = Number(taxPercent);
+      batch.discountPercent = Number(discountPercent);
+      batch.extraChargePerProduct = Number(extraChargePerProduct);
+      if (barcode || product.barcode) batch.barcode = barcode || product.barcode;
+      await batch.save({ session });
+    } else {
+      batch = new StockBatch({
+        productId,
+        purchaseId,
+        sourceType,
+        sourceId: purchaseId,
+        batchNo: batchNo || `BATCH-${Date.now()}`,
+        quantity: quantityToAdd,
+        availableQty: quantityToAdd,
+        purchasePrice: nextPurchasePrice,
+        taxPercent: Number(taxPercent),
+        discountPercent: Number(discountPercent),
+        extraChargePerProduct: Number(extraChargePerProduct),
+        salePrice: nextSalePrice,
+        expiryDate,
+        barcode: barcode || product.barcode
+      });
+      await batch.save({ session });
+    }
 
     // 3. Update Product stock and standard pricing
     product.stock = newStock;
-    product.purchasePrice = Number(purchasePrice);
-    if (salePrice) product.salesPrice = Number(salePrice);
+    product.purchasePrice = nextPurchasePrice;
+    if (salePrice !== undefined && salePrice !== null) product.salesPrice = nextSalePrice;
     await product.save({ session });
 
     // 4. Create StockMovement
     const movement = new StockMovement({
       product: productId,
       productName: product.name,
-      type: 'purchase',
-      quantity: Number(quantity),
+      type: sourceType === 'opening_stock' || sourceType === 'manual_adjustment' ? 'adjustment' : 'purchase',
+      quantity: quantityToAdd,
       previousStock,
       newStock,
       reference,
       referenceId: purchaseId,
+      batchId: batch._id,
+      salePrice: nextSalePrice,
       notes: notes || `Stock added via purchase batch: ${batchNo}`,
       createdBy
     });
@@ -88,6 +116,7 @@ export const inventoryService = {
    */
   deductStock: async ({
     productId,
+    batchId,
     quantity,
     reference,
     referenceId,
@@ -105,33 +134,51 @@ export const inventoryService = {
 
     const newStock = previousStock - Number(quantity);
 
-    // 2. Perform FIFO Deduction
-    let remainingToDeduct = Number(quantity);
-    const batches = await StockBatch.find({ productId, availableQty: { $gt: 0 } })
-      .sort({ createdAt: 1 }) // FIFO
-      .session(session);
+    const quantityToDeduct = Number(quantity);
+    let selectedBatch = null;
+    let purchaseCost = Number(product.purchasePrice || 0) * quantityToDeduct;
 
-    for (const batch of batches) {
-      if (remainingToDeduct <= 0) break;
-      const deduction = Math.min(batch.availableQty, remainingToDeduct);
-      batch.availableQty -= deduction;
-      remainingToDeduct -= deduction;
-      await batch.save({ session });
-    }
-
-    if (remainingToDeduct > 0) {
-      // Create a legacy fallback batch on the fly to support legacy data gracefully
-      const fallbackBatch = new StockBatch({
+    if (batchId) {
+      selectedBatch = await StockBatch.findOne({
+        _id: batchId,
         productId,
-        batchNo: `LEGACY-AUTO-${Date.now()}`,
-        quantity: remainingToDeduct,
-        availableQty: 0, // fully deducted immediately
-        purchasePrice: product.purchasePrice || 0,
-        salePrice: product.salesPrice || product.purchasePrice || 0,
-        barcode: product.barcode || product.sku
-      });
-      await fallbackBatch.save({ session });
-      remainingToDeduct = 0;
+        isActive: { $ne: false },
+      }).session(session);
+      if (!selectedBatch) {
+        throw new Error(`Selected price batch was not found for ${product.name}.`);
+      }
+      if (Number(selectedBatch.availableQty || 0) < quantityToDeduct) {
+        throw new Error(`Selected price batch has only ${selectedBatch.availableQty} qty available.`);
+      }
+      selectedBatch.availableQty -= quantityToDeduct;
+      purchaseCost = Number(selectedBatch.purchasePrice || 0) * quantityToDeduct;
+      await selectedBatch.save({ session });
+      await SalesPrice.updateMany(
+        { batchId: selectedBatch._id },
+        { $inc: { availableQty: -quantityToDeduct } },
+        { session }
+      );
+    } else {
+      const activeBatches = await StockBatch.find({ productId, isActive: { $ne: false }, availableQty: { $gt: 0 } })
+        .sort({ createdAt: -1 })
+        .session(session);
+      if (activeBatches.length > 1) {
+        throw new Error(`Please select selling price for ${product.name}.`);
+      }
+      selectedBatch = activeBatches[0] || null;
+      if (selectedBatch) {
+        if (Number(selectedBatch.availableQty || 0) < quantityToDeduct) {
+          throw new Error(`Selected price batch has only ${selectedBatch.availableQty} qty available.`);
+        }
+        selectedBatch.availableQty -= quantityToDeduct;
+        purchaseCost = Number(selectedBatch.purchasePrice || 0) * quantityToDeduct;
+        await selectedBatch.save({ session });
+        await SalesPrice.updateMany(
+          { batchId: selectedBatch._id },
+          { $inc: { availableQty: -quantityToDeduct } },
+          { session }
+        );
+      }
     }
 
     // 3. Update Product stock level
@@ -143,11 +190,13 @@ export const inventoryService = {
       product: productId,
       productName: product.name,
       type: 'sale',
-      quantity: -Number(quantity),
+      quantity: -quantityToDeduct,
       previousStock,
       newStock,
       reference,
       referenceId,
+      batchId: selectedBatch?._id,
+      salePrice: selectedBatch?.salePrice || product.salesPrice || 0,
       notes: notes || `Stock deducted via sale: ${reference}`,
       createdBy
     });
@@ -165,7 +214,7 @@ export const inventoryService = {
       }
     });
 
-    return movement;
+    return { movement, batch: selectedBatch, purchaseCost };
   },
 
   /**
