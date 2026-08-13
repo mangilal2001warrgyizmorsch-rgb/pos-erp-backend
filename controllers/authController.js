@@ -219,3 +219,62 @@ export const changePassword = async (req, res, next) => {
     next(error);
   }
 };
+
+// @desc    Get all users (Admin only)
+// @route   GET /api/auth/users
+export const getUsers = async (req, res, next) => {
+  try {
+    const users = await User.find({}).select('-password');
+    res.status(200).json({
+      success: true,
+      data: users,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Update user role & permissions (Admin only)
+// @route   PUT /api/auth/users/:id
+export const updateUserRole = async (req, res, next) => {
+  try {
+    const { role } = req.body;
+    
+    // Validate role
+    const validRoles = ['admin', 'manager', 'accountant', 'stock_manager', 'cashier'];
+    if (!role || !validRoles.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid role provided',
+      });
+    }
+
+    // Do not allow self demotion from admin
+    if (req.user._id.toString() === req.params.id && role !== 'admin') {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot change your own admin role',
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { role },
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: user,
+    });
+  } catch (error) {
+    next(error);
+  }
+};

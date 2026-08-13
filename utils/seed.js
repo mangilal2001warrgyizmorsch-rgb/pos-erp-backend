@@ -44,8 +44,8 @@ const seedData = async () => {
       },
       {
         name: 'Stock Manager User',
-        email: 'stock_manager@poserp.com',
-        password: 'stock_manager123',
+        email: 'stockmanager@poserp.com',
+        password: 'stockmanager123',
         role: 'stock_manager',
         phone: '6677889900',
       },
