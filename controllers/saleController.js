@@ -14,6 +14,7 @@ import { recordStockMovement } from '../utils/stockMovement.js';
 import BankAccount from '../models/BankAccount.js';
 import CashBankTransaction from '../models/CashBankTransaction.js';
 import PartyLedger from '../models/PartyLedger.js';
+import Shift from '../models/Shift.js';
 import {
   markSaleAccountingFailure,
   postSaleAccountingVoucher,
@@ -737,6 +738,24 @@ export const getDashboardStats = async (req, res, next) => {
       .select('name stock lowStockThreshold sku')
       .limit(10);
 
+    // --- Accounting Stats ---
+    const bankAccounts = await BankAccount.find({ isActive: true });
+    let totalCashBalance = 0;
+    let totalBankBalance = 0;
+    bankAccounts.forEach(acc => {
+      if (acc.type === 'cash') totalCashBalance += (acc.balance || 0);
+      else totalBankBalance += (acc.balance || 0);
+    });
+
+    const recentTransactions = await CashBankTransaction.find({})
+      .populate('accountId', 'name')
+      .sort('-date -createdAt')
+      .limit(5);
+
+    // --- Cashier/Shift Stats ---
+    const activeShift = await Shift.findOne({ userId: req.user._id, status: 'open' })
+      .select('startTime startingCash currentCash status shiftNumber');
+
     res.status(200).json({
       success: true,
       data: {
@@ -750,6 +769,12 @@ export const getDashboardStats = async (req, res, next) => {
         recentSales,
         lowStockProducts,
         paymentBreakdown,
+        accounting: {
+          totalCashBalance,
+          totalBankBalance,
+          recentTransactions
+        },
+        shift: activeShift || null
       },
     });
   } catch (error) {

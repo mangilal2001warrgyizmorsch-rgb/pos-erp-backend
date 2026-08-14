@@ -1,4 +1,5 @@
 import User from '../models/User.js';
+import Role from '../models/Role.js';
 import crypto from 'crypto';
 
 // @desc    Register user
@@ -16,7 +17,14 @@ export const register = async (req, res, next) => {
       });
     }
 
-    const user = await User.create({ name, email, password, role, phone });
+    // Get default role permissions
+    let defaultPermissions = [];
+    const roleDoc = await Role.findOne({ name: role || 'cashier' });
+    if (roleDoc) {
+      defaultPermissions = roleDoc.permissions;
+    }
+
+    const user = await User.create({ name, email, password, role, phone, permissions: defaultPermissions });
     const token = user.generateToken();
 
     res.status(201).json({
@@ -73,6 +81,7 @@ export const login = async (req, res, next) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        permissions: user.permissions,
         phone: user.phone,
       },
       token,
@@ -220,6 +229,50 @@ export const changePassword = async (req, res, next) => {
   }
 };
 
+// @desc    Create new user (Admin only)
+// @route   POST /api/auth/users
+export const createUser = async (req, res, next) => {
+  try {
+    const { name, email, password, role, phone, permissions, isActive } = req.body;
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'User with this email already exists' });
+    }
+
+    let finalPermissions = permissions;
+    if (!finalPermissions || !Array.isArray(finalPermissions) || finalPermissions.length === 0) {
+      const roleDoc = await Role.findOne({ name: role || 'cashier' });
+      finalPermissions = roleDoc ? roleDoc.permissions : [];
+    }
+
+    const user = await User.create({
+      name,
+      email,
+      password,
+      role: role || 'cashier',
+      phone,
+      permissions: finalPermissions,
+      isActive: isActive !== undefined ? isActive : true
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        phone: user.phone,
+        permissions: user.permissions,
+        isActive: user.isActive
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Get all users (Admin only)
 // @route   GET /api/auth/users
 export const getUsers = async (req, res, next) => {
@@ -234,45 +287,138 @@ export const getUsers = async (req, res, next) => {
   }
 };
 
-// @desc    Update user role & permissions (Admin only)
+// @desc    Update user info, role & permissions (Admin only)
 // @route   PUT /api/auth/users/:id
-export const updateUserRole = async (req, res, next) => {
+export const updateUser = async (req, res, next) => {
   try {
-    const { role } = req.body;
+    const { name, email, phone, role, permissions, isActive, password } = req.body;
     
-    // Validate role
-    const validRoles = ['admin', 'manager', 'accountant', 'stock_manager', 'cashier'];
-    if (!role || !validRoles.includes(role)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid role provided',
-      });
-    }
-
     // Do not allow self demotion from admin
-    if (req.user._id.toString() === req.params.id && role !== 'admin') {
+    if (req.user._id.toString() === req.params.id && role && role !== 'admin') {
       return res.status(400).json({
         success: false,
         message: 'You cannot change your own admin role',
       });
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { role },
-      { new: true, runValidators: true }
-    ).select('-password');
+    // Do not allow deactivating self
+    if (req.user._id.toString() === req.params.id && isActive === false) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot deactivate your own account',
+      });
+    }
 
+    const user = await User.findById(req.params.id);
     if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    if (name) user.name = name;
+    if (email && email !== user.email) {
+      const exists = await User.findOne({ email });
+      if (exists) return res.status(400).json({ success: false, message: 'Email already in use' });
+      user.email = email;
+    }
+    if (phone !== undefined) user.phone = phone;
+    if (isActive !== undefined) user.isActive = isActive;
+    
+    if (role) {
+      const validRoles = ['admin', 'manager', 'accountant', 'stock_manager', 'cashier'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ success: false, message: 'Invalid role provided' });
+      }
+      
+      // If role changed and no permissions passed, update to new role's defaults
+      if (role !== user.role && (!permissions || !Array.isArray(permissions))) {
+        const roleDoc = await Role.findOne({ name: role });
+        if (roleDoc) user.permissions = roleDoc.permissions;
+      }
+      user.role = role;
+    }
+
+    if (permissions && Array.isArray(permissions)) {
+      user.permissions = permissions;
+    }
+
+    if (password) {
+      user.password = password;
+    }
+
+    await user.save(); // using save to trigger pre('save') for password hash if modified
+
+    const updatedUser = await User.findById(req.params.id).select('-password');
+    res.status(200).json({
+      success: true,
+      data: updatedUser,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Delete user (Admin only)
+// @route   DELETE /api/auth/users/:id
+export const deleteUser = async (req, res, next) => {
+  try {
+    if (req.user._id.toString() === req.params.id) {
+      return res.status(400).json({ success: false, message: 'You cannot delete your own account' });
+    }
+
+    const user = await User.findByIdAndDelete(req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    res.status(200).json({ success: true, message: 'User deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get all roles and their default permissions (Admin only)
+// @route   GET /api/auth/roles
+export const getRoles = async (req, res, next) => {
+  try {
+    const roles = await Role.find({});
+    res.status(200).json({
+      success: true,
+      data: roles,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Update a role's default permissions (Admin only)
+// @route   PUT /api/auth/roles/:id
+export const updateRolePermissions = async (req, res, next) => {
+  try {
+    const { permissions } = req.body;
+
+    if (!permissions || !Array.isArray(permissions)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Permissions array is required',
+      });
+    }
+
+    const role = await Role.findByIdAndUpdate(
+      req.params.id,
+      { permissions },
+      { new: true, runValidators: true }
+    );
+
+    if (!role) {
       return res.status(404).json({
         success: false,
-        message: 'User not found',
+        message: 'Role not found',
       });
     }
 
     res.status(200).json({
       success: true,
-      data: user,
+      data: role,
     });
   } catch (error) {
     next(error);

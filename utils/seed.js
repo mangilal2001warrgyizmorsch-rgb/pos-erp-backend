@@ -2,6 +2,7 @@ import 'dotenv/config';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import connectDB from '../config/db.js';
+import Role from '../models/Role.js';
 import User from '../models/User.js';
 import Category from '../models/Category.js';
 import Product from '../models/Product.js';
@@ -12,12 +13,25 @@ const seedData = async () => {
     await connectDB();
 
     // Clear existing data
+    await Role.deleteMany({});
     await User.deleteMany({});
     await Category.deleteMany({});
     await Product.deleteMany({});
     await Customer.deleteMany({});
 
     console.log('Cleared existing data');
+
+    const allPermissions = ['dashboard', 'sales', 'purchases', 'inventory', 'products', 'categories', 'subcategories', 'customers', 'suppliers', 'accounting', 'bank', 'cash', 'cash-bank', 'expenses', 'loans', 'cheques', 'reports', 'settings', 'pos', 'activity', 'shifts', 'backup', 'transporters', 'utilities', 'checkout'];
+
+    // Create roles
+    const roles = await Role.create([
+      { name: 'admin', permissions: allPermissions },
+      { name: 'manager', permissions: ['dashboard', 'sales', 'purchases', 'inventory', 'products', 'categories', 'customers', 'suppliers', 'reports', 'pos', 'shifts'] },
+      { name: 'accountant', permissions: ['dashboard', 'accounting', 'bank', 'cash', 'cash-bank', 'expenses', 'loans', 'cheques', 'reports'] },
+      { name: 'stock_manager', permissions: ['dashboard', 'inventory', 'products', 'categories', 'subcategories', 'purchases', 'suppliers', 'transporters'] },
+      { name: 'cashier', permissions: ['dashboard', 'pos', 'sales', 'customers', 'checkout', 'shifts'] }
+    ]);
+    console.log('Roles seeded');
 
     // Create users
     const users = await User.create([
@@ -26,6 +40,7 @@ const seedData = async () => {
         email: 'admin@poserp.com',
         password: 'admin123',
         role: 'admin',
+        permissions: roles.find(r => r.name === 'admin').permissions,
         phone: '1234567890',
       },
       {
@@ -33,6 +48,7 @@ const seedData = async () => {
         email: 'manager@poserp.com',
         password: 'manager123',
         role: 'manager',
+        permissions: roles.find(r => r.name === 'manager').permissions,
         phone: '1122334455',
       },
       {
@@ -40,6 +56,7 @@ const seedData = async () => {
         email: 'accountant@poserp.com',
         password: 'accountant123',
         role: 'accountant',
+        permissions: roles.find(r => r.name === 'accountant').permissions,
         phone: '5544332211',
       },
       {
@@ -47,6 +64,7 @@ const seedData = async () => {
         email: 'stockmanager@poserp.com',
         password: 'stockmanager123',
         role: 'stock_manager',
+        permissions: roles.find(r => r.name === 'stock_manager').permissions,
         phone: '6677889900',
       },
       {
@@ -54,6 +72,7 @@ const seedData = async () => {
         email: 'cashier@poserp.com',
         password: 'cashier123',
         role: 'cashier',
+        permissions: roles.find(r => r.name === 'cashier').permissions,
         phone: '0987654321',
       },
     ]);

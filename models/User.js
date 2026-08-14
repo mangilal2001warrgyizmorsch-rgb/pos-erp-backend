@@ -30,6 +30,11 @@ const userSchema = new mongoose.Schema(
       enum: ['admin', 'manager', 'accountant', 'stock_manager', 'cashier'],
       default: 'cashier',
     },
+    permissions: [
+      {
+        type: String,
+      },
+    ],
     phone: {
       type: String,
       trim: true,
