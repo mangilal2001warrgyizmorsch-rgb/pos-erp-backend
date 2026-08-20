@@ -380,7 +380,21 @@ export const deleteUser = async (req, res, next) => {
 // @route   GET /api/auth/roles
 export const getRoles = async (req, res, next) => {
   try {
-    const roles = await Role.find({});
+    let roles = await Role.find({});
+    
+    // Auto-seed default roles if collection is empty
+    if (roles.length === 0) {
+      const defaultRoles = [
+        { name: 'admin', permissions: ['dashboard', 'sales', 'purchases', 'inventory', 'products', 'categories', 'subcategories', 'customers', 'suppliers', 'accounting', 'bank', 'cash', 'cash-bank', 'expenses', 'loans', 'cheques', 'reports', 'settings', 'pos', 'activity', 'shifts', 'backup', 'transporters', 'utilities', 'checkout'] },
+        { name: 'manager', permissions: ['dashboard', 'sales', 'purchases', 'inventory', 'products', 'categories', 'customers', 'suppliers', 'reports', 'pos', 'shifts'] },
+        { name: 'accountant', permissions: ['dashboard', 'accounting', 'bank', 'cash', 'cash-bank', 'expenses', 'loans', 'cheques', 'reports'] },
+        { name: 'stock_manager', permissions: ['dashboard', 'inventory', 'products', 'categories', 'subcategories', 'transporters'] },
+        { name: 'cashier', permissions: ['dashboard', 'sales', 'customers', 'pos', 'shifts', 'checkout'] }
+      ];
+      await Role.insertMany(defaultRoles);
+      roles = await Role.find({});
+    }
+
     res.status(200).json({
       success: true,
       data: roles,
