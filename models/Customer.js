@@ -12,7 +12,13 @@ const customerSchema = new mongoose.Schema(
       type: String,
       trim: true,
       lowercase: true,
-      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
+      validate: {
+        validator: function(v) {
+          if (!v) return true; // Allow empty
+          return /^\S+@\S+\.\S+$/.test(v);
+        },
+        message: "Please provide a valid email"
+      }
     },
     gstNumber: {
       type: String,

@@ -10,6 +10,7 @@
     "seed": "node utils/seed.js"
   },
   "dependencies": {
+    "@kapso/whatsapp-cloud-api": "^0.3.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -21,7 +22,10 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^2.4.5",
-    "socket.io": "^4.8.3"
+    "pdfkit": "^0.20.1",
+    "roboto-font": "^0.1.0",
+    "socket.io": "^4.8.3",
+    "twilio": "^6.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.15",

@@ -14,6 +14,7 @@ import { initSocket } from './utils/socket.js';
 
 // Route imports
 import authRoutes from './routes/authRoutes.js';
+import integrationRoutes from './routes/integrationRoutes.js';
 import productRoutes from './routes/productRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import subcategoryRoutes from './routes/subcategoryRoutes.js';
@@ -111,6 +112,7 @@ app.use('/uploads', express.static(uploadsDir));
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/integrations', integrationRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/subcategories', subcategoryRoutes);
