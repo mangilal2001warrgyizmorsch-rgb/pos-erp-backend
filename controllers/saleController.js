@@ -12,6 +12,7 @@ import { partyLedgerService } from '../services/partyLedgerService.js';
 import { emitSocketEvent } from '../utils/socket.js';
 import { recordStockMovement } from '../utils/stockMovement.js';
 import { sendWhatsAppBill } from '../services/whatsappService.js';
+import { sendEmailBill } from '../services/emailService.js';
 import BankAccount from '../models/BankAccount.js';
 import CashBankTransaction from '../models/CashBankTransaction.js';
 import PartyLedger from '../models/PartyLedger.js';
@@ -398,8 +399,8 @@ export const createSale = async (req, res, next) => {
       .populate('items.product', 'name sku');
 
     if (req.body.sendWhatsapp && populatedSale.customer) {
-      // Trigger async whatsapp bill
       sendWhatsAppBill(populatedSale, populatedSale.customer).catch(e => console.error('[WhatsApp] async send failed:', e));
+      sendEmailBill(populatedSale, populatedSale.customer).catch(e => console.error('[Email] async send failed:', e));
     }
 
     res.status(201).json({

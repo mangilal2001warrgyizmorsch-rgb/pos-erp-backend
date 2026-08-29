@@ -46,6 +46,7 @@ import stockRoutes from './routes/stockRoutes.js';
 import activityLogRoutes from './routes/activityLogRoutes.js';
 import accountingRoutes from './routes/accounting.routes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import marketingRoutes from './routes/marketingRoutes.js';
 import { reconcileLegacyLedgers } from './utils/reconcileLedgers.js';
 
 
@@ -146,6 +147,7 @@ app.use('/api/stock', stockRoutes);
 app.use('/api/activity-logs', activityLogRoutes);
 app.use('/api/accounting', accountingRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/marketing', marketingRoutes);
 
 
 // Health check

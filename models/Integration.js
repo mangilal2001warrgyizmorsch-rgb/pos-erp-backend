@@ -19,6 +19,7 @@ const integrationSchema = new mongoose.Schema(
       port: { type: Number },
       user: { type: String },
       password: { type: String },
+      sendgridApiKey: { type: String },
     }
   },
   { timestamps: true }
