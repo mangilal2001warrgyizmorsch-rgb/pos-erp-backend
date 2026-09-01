@@ -6,6 +6,9 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import xss from 'xss-clean';
+import mongoSanitize from 'express-mongo-sanitize';
 
 import connectDB from './config/db.js';
 import errorHandler from './middleware/errorHandler.js';
@@ -78,14 +81,19 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Security middlewares
+app.use(helmet()); // Set security HTTP headers
+app.use(xss()); // Sanitize data against XSS
+app.use(mongoSanitize()); // Prevent NoSQL Injection
+
 // Rate limiting
-// const apiLimiter = rateLimit({
-//   windowMs: 15 * 60 * 1000, // 15 minutes
-//   max: 1000, // Limit each IP to 1000 requests per `window` (here, per 15 minutes)
-//   standardHeaders: true,
-//   legacyHeaders: false,
-//   message: 'Too many requests from this IP, please try again after 15 minutes',
-// });
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per `window` (here, per 15 minutes)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many requests from this IP, please try again after 15 minutes',
+});
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -95,7 +103,7 @@ const authLimiter = rateLimit({
   message: 'Too many login attempts from this IP, please try again after 15 minutes',
 });
 
-// app.use('/api/', apiLimiter);
+app.use('/api/', apiLimiter);
 
 app.use('/api/auth', authLimiter);
 

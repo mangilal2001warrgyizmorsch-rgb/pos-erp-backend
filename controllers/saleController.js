@@ -532,10 +532,16 @@ export const getSale = async (req, res, next) => {
 // @desc    Cancel sale and restore stock
 // @route   PUT /api/sales/:id/cancel
 export const cancelSale = async (req, res, next) => {
+  const isReplicaSet = mongoose.connection.client.topology?.description?.type !== 'Single';
+  const session = isReplicaSet ? await mongoose.startSession() : null;
+  if (session) session.startTransaction();
+
   try {
-    const sale = await Sale.findById(req.params.id);
+    const sale = await Sale.findById(req.params.id).session(session);
 
     if (!sale) {
+      if (session) await session.abortTransaction();
+      if (session) session.endSession();
       return res.status(404).json({
         success: false,
         message: 'Sale not found',
@@ -543,6 +549,8 @@ export const cancelSale = async (req, res, next) => {
     }
 
     if (sale.status === 'cancelled') {
+      if (session) await session.abortTransaction();
+      if (session) session.endSession();
       return res.status(400).json({
         success: false,
         message: 'Sale is already cancelled',
@@ -556,17 +564,17 @@ export const cancelSale = async (req, res, next) => {
       const product = await Product.findByIdAndUpdate(
         item.product,
         { $inc: { stock: item.quantity } },
-        { new: true }
+        { new: true, session }
       );
 
       if (product) {
         const batch = item.batchId
-          ? await StockBatch.findById(item.batchId)
-          : await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 });
+          ? await StockBatch.findById(item.batchId).session(session)
+          : await StockBatch.findOne({ productId: product._id }).sort({ createdAt: -1 }).session(session);
         if (batch) {
           batch.availableQty += item.quantity;
-          await batch.save();
-          await SalesPrice.updateMany({ batchId: batch._id }, { $inc: { availableQty: item.quantity } });
+          await batch.save({ session });
+          await SalesPrice.updateMany({ batchId: batch._id }, { $inc: { availableQty: item.quantity } }, { session });
         }
         await recordStockMovement({
           productId: product._id,
@@ -581,16 +589,16 @@ export const cancelSale = async (req, res, next) => {
           salePrice: item.salePrice || item.unitPrice || item.rate || 0,
           notes: 'Sale cancelled',
           createdBy: req.user._id,
-        });
+        }, session); // Pass session if supported, otherwise it falls back
       }
     }
 
     // Reverse the cash/bank transaction
-    await reverseReferenceTransaction('sale_invoice', sale._id, req.user._id, 'Sale cancelled');
+    await reverseReferenceTransaction('sale_invoice', sale._id, req.user._id, 'Sale cancelled'); // Note: External func
 
     // Update sale status
     sale.status = 'cancelled';
-    await sale.save();
+    await sale.save({ session });
 
     // Update customer stats if customer exists
     if (sale.customer) {
@@ -601,7 +609,8 @@ export const cancelSale = async (req, res, next) => {
             totalPurchases: -1,
             totalSpent: -sale.totalAmount,
           },
-        }
+        },
+        { session }
       );
     }
 
@@ -611,8 +620,11 @@ export const cancelSale = async (req, res, next) => {
       sale.accountingPosted = false;
       sale.accountingStatus = 'not_posted';
       sale.accountingError = '';
-      await sale.save({ validateBeforeSave: false });
+      await sale.save({ session, validateBeforeSave: false });
     }
+
+    if (session) await session.commitTransaction();
+    if (session) session.endSession();
 
     res.status(200).json({
       success: true,
@@ -620,6 +632,8 @@ export const cancelSale = async (req, res, next) => {
       message: 'Sale cancelled and stock restored successfully',
     });
   } catch (error) {
+    if (session) await session.abortTransaction();
+    if (session) session.endSession();
     next(error);
   }
 };

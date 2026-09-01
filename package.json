@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
     "seed": "node utils/seed.js"
   },
   "dependencies": {
@@ -16,8 +17,10 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^8.5.1",
     "express-validator": "^7.2.0",
+    "helmet": "^8.3.0",
     "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.7.0",
@@ -28,10 +31,14 @@
     "pdfkit": "^0.20.1",
     "roboto-font": "^0.1.0",
     "socket.io": "^4.8.3",
-    "twilio": "^6.1.0"
+    "twilio": "^6.1.0",
+    "xss-clean": "^0.1.4"
   },
   "devDependencies": {
     "@types/react": "^19.2.15",
-    "nodemon": "^3.1.4"
+    "cross-env": "^10.1.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.4",
+    "supertest": "^7.2.2"
   }
 }

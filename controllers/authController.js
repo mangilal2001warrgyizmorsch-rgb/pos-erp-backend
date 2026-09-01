@@ -1,6 +1,31 @@
 import User from '../models/User.js';
 import Role from '../models/Role.js';
+import RefreshToken from '../models/RefreshToken.js';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
+
+const generateTokens = async (user, res) => {
+  const accessToken = user.generateToken(); // This should now have a short expiry, e.g., 15m in .env
+  
+  const refreshTokenString = crypto.randomBytes(40).toString('hex');
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+  await RefreshToken.create({
+    token: refreshTokenString,
+    user: user._id,
+    expiresAt,
+  });
+
+  // Set HTTP-Only cookie for refresh token
+  res.cookie('refreshToken', refreshTokenString, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+  });
+
+  return accessToken;
+};
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -25,7 +50,7 @@ export const register = async (req, res, next) => {
     }
 
     const user = await User.create({ name, email, password, role, phone, permissions: defaultPermissions });
-    const token = user.generateToken();
+    const accessToken = await generateTokens(user, res);
 
     res.status(201).json({
       success: true,
@@ -36,7 +61,7 @@ export const register = async (req, res, next) => {
         role: user.role,
         phone: user.phone,
       },
-      token,
+      token: accessToken,
     });
   } catch (error) {
     next(error);
@@ -72,7 +97,7 @@ export const login = async (req, res, next) => {
       });
     }
 
-    const token = user.generateToken();
+    const accessToken = await generateTokens(user, res);
 
     res.status(200).json({
       success: true,
@@ -84,7 +109,61 @@ export const login = async (req, res, next) => {
         permissions: user.permissions,
         phone: user.phone,
       },
-      token,
+      token: accessToken,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Refresh Access Token
+// @route   POST /api/auth/refresh
+export const refresh = async (req, res, next) => {
+  try {
+    const refreshTokenString = req.cookies?.refreshToken || req.body.refreshToken;
+
+    if (!refreshTokenString) {
+      return res.status(401).json({ success: false, message: 'No refresh token provided' });
+    }
+
+    const refreshToken = await RefreshToken.findOne({ token: refreshTokenString }).populate('user');
+
+    if (!refreshToken || !refreshToken.isActive) {
+      return res.status(401).json({ success: false, message: 'Invalid or expired refresh token' });
+    }
+
+    // Revoke old token and generate new pair (Token Rotation)
+    refreshToken.revoked = true;
+    await refreshToken.save();
+
+    const newAccessToken = await generateTokens(refreshToken.user, res);
+
+    res.status(200).json({
+      success: true,
+      token: newAccessToken,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Logout user
+// @route   POST /api/auth/logout
+export const logout = async (req, res, next) => {
+  try {
+    const refreshTokenString = req.cookies?.refreshToken;
+    if (refreshTokenString) {
+      await RefreshToken.findOneAndUpdate({ token: refreshTokenString }, { revoked: true });
+    }
+
+    res.cookie('refreshToken', 'none', {
+      expires: new Date(Date.now() + 10 * 1000),
+      httpOnly: true,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Logged out successfully',
     });
   } catch (error) {
     next(error);
