@@ -10,6 +10,7 @@ import {
   getUnpaidSales,
   updateSale,
   deleteSale,
+  generateEinvoice,
 } from '../controllers/saleController.js';
 import {
   getUnreturnedSalesForCustomer,
@@ -31,5 +32,6 @@ router.route('/:id')
   .put(authorize('admin', 'manager'), updateSale)
   .delete(authorize('admin', 'manager'), deleteSale);
 router.route('/:id/cancel').put(authorize('admin', 'manager'), cancelSale);
+router.route('/:id/einvoice').post(authorize('admin', 'manager', 'cashier'), generateEinvoice);
 
 export default router;

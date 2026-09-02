@@ -23,6 +23,7 @@ import {
 } from '../services/accounting/salesAccounting.service.js';
 import { ensureCustomerAccountingLedger } from '../services/accounting/partyAccountingLedger.service.js';
 import { cancelVoucher } from '../services/accounting/voucher.service.js';
+import { generateEInvoice } from '../services/einvoice.service.js';
 
 const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
@@ -1225,5 +1226,14 @@ export const updateSale = async (req, res, next) => {
     next(error);
   } finally {
     if (session) session.endSession();
+  }
+};
+
+export const generateEinvoice = async (req, res) => {
+  try {
+    const sale = await generateEInvoice(req.params.id);
+    res.status(200).json({ success: true, data: sale, message: 'E-Invoice generated successfully' });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
   }
 };

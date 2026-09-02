@@ -11,6 +11,7 @@ const businessProfileSchema = new mongoose.Schema(
     businessType: { type: String },
     category: { type: String },
     state: { type: String },
+    stateCode: { type: String },
     pincode: { type: String },
     logo: { type: String },
     signature: { type: String },

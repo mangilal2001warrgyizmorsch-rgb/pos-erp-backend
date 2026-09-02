@@ -242,6 +242,23 @@ const saleSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    irn: {
+      type: String,
+      trim: true,
+    },
+    qrCode: {
+      type: String,
+      trim: true,
+    },
+    eInvoiceStatus: {
+      type: String,
+      enum: ['pending', 'generated', 'failed', 'not_applicable'],
+      default: 'not_applicable',
+    },
+    ewayBillNumber: {
+      type: String,
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['completed', 'cancelled', 'refunded'],

@@ -10,6 +10,8 @@ const partyLedgerSchema = new mongoose.Schema({
   referenceId: { type: mongoose.Schema.Types.ObjectId },
   receiptNo: { type: String },
   date: { type: Date, required: true, default: Date.now },
+  dueDate: { type: Date },
+  status: { type: String, enum: ['pending', 'partial', 'paid'], default: 'paid' },
   notes: { type: String },
 }, { timestamps: true });
 

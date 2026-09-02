@@ -83,6 +83,23 @@ const customerSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    // Digital Khaata / Ledger Tracking Fields
+    currentBalance: {
+      type: Number,
+      default: 0,
+      description: "Positive means customer owes us. Negative means we owe customer.",
+    },
+    creditDays: {
+      type: Number,
+      default: 30,
+    },
+    isAutoReminderEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    lastReminderSentAt: {
+      type: Date,
+    },
     accountingLedgerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ledger",
